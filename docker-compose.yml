@@ -25,8 +25,12 @@ services:
       FINANCE_ENVIRONMENT: development
       FINANCE_LOG_LEVEL: INFO
       FINANCE_DATABASE_URL: postgresql+psycopg://finance:finance@db:5432/finance
+      FINANCE_IMPORT_STORAGE_ROOT: /var/lib/finance-aggregator/imports
+      FINANCE_IMPORT_MAX_FILE_SIZE_BYTES: 26214400
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      - import-storage:/var/lib/finance-aggregator/imports
     depends_on:
       db:
         condition: service_healthy
@@ -43,5 +47,23 @@ services:
       retries: 10
       start_period: 10s
 
+  worker:
+    build:
+      context: .
+    entrypoint: ["python", "-m", "apps.worker.main"]
+    environment:
+      FINANCE_ENVIRONMENT: development
+      FINANCE_LOG_LEVEL: INFO
+      FINANCE_DATABASE_URL: postgresql+psycopg://finance:finance@db:5432/finance
+      FINANCE_IMPORT_STORAGE_ROOT: /var/lib/finance-aggregator/imports
+      FINANCE_IMPORT_MAX_FILE_SIZE_BYTES: 26214400
+      FINANCE_WORKER_POLL_INTERVAL_SECONDS: 1
+    volumes:
+      - import-storage:/var/lib/finance-aggregator/imports
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres-data:
+  import-storage:

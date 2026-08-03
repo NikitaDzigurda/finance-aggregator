@@ -4,7 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, String, Uuid
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from shared.database import Base
@@ -34,6 +34,7 @@ class AccountModel(TimestampMixin, Base):
             "institution_name IS NULL OR btrim(institution_name) <> ''",
             name="account_institution_name_not_blank",
         ),
+        UniqueConstraint("id", "portfolio_id", name="uq_accounts_id_portfolio_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)

@@ -7,11 +7,17 @@ from fastapi import FastAPI
 
 from apps.api.routes.accounts import router as accounts_router
 from apps.api.routes.health import router as health_router
+from apps.api.routes.imports import formats_router as import_formats_router
+from apps.api.routes.imports import router as imports_router
 from apps.api.routes.instruments import router as instruments_router
+from apps.api.routes.operations import router as operations_router
 from apps.api.routes.portfolios import router as portfolios_router
 from shared.config import get_settings
 from shared.database import engine
 from shared.errors import default_error_responses, install_exception_handlers
+from shared.model_registry import load_domain_models
+
+load_domain_models()
 
 
 @asynccontextmanager
@@ -38,6 +44,9 @@ def create_app() -> FastAPI:
     application.include_router(portfolios_router)
     application.include_router(accounts_router)
     application.include_router(instruments_router)
+    application.include_router(operations_router)
+    application.include_router(imports_router)
+    application.include_router(import_formats_router)
     return application
 
 

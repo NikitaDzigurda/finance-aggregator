@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
     database_echo: bool = False
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_max_overflow: int = Field(default=10, ge=0, le=100)
+    import_storage_root: Path = Path("/tmp/finance-aggregator/imports")
+    import_max_file_size_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
 
 
 @lru_cache
