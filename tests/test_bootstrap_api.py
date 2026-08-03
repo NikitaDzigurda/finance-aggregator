@@ -18,3 +18,7 @@ async def test_bootstrap_http_surface_is_available() -> None:
     assert docs_response.status_code == 200
     assert openapi_response.status_code == 200
     assert openapi_response.json()["info"]["title"] == "Finance Aggregator API"
+    live_responses = openapi_response.json()["paths"]["/health/live"]["get"]["responses"]
+    assert live_responses["422"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }

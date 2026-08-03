@@ -8,8 +8,21 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from accounts.models import AccountModel as _AccountModel
+from instruments.models import (
+    InstrumentIdentifierModel as _InstrumentIdentifierModel,
+)
+from instruments.models import InstrumentModel as _InstrumentModel
+from portfolios.models import PortfolioModel as _PortfolioModel
 from shared.config import get_settings
 from shared.database import Base
+
+_DOMAIN_MODELS = (
+    _PortfolioModel,
+    _AccountModel,
+    _InstrumentModel,
+    _InstrumentIdentifierModel,
+)
 
 config = context.config
 

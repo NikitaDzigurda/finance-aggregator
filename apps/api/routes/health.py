@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import check_database, get_db_session
+from shared.errors import ApiErrorException, ErrorResponse
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -30,6 +31,12 @@ async def live() -> HealthResponse:
 @router.get(
     "/ready",
     response_model=HealthResponse,
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "PostgreSQL is not reachable",
+        }
+    },
     summary="Check whether the API can reach PostgreSQL",
 )
 async def ready(
@@ -38,8 +45,9 @@ async def ready(
     try:
         await check_database(session)
     except SQLAlchemyError as exc:
-        raise HTTPException(
+        raise ApiErrorException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database is unavailable",
+            code="database_unavailable",
+            message="Database is unavailable",
         ) from exc
     return HealthResponse(status="ok")
