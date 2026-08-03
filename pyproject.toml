@@ -1,0 +1,63 @@
+[project]
+name = "finance-aggregator"
+version = "0.1.0"
+description = "Backend-first personal finance aggregation service"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "alembic>=1.16.4",
+    "fastapi>=0.116.1",
+    "psycopg[binary]>=3.2.9",
+    "pydantic-settings>=2.10.1",
+    "sqlalchemy[asyncio]>=2.0.41",
+    "structlog>=25.4.0",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=1.17.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.7",
+]
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "accounts",
+    "allocation",
+    "calculation",
+    "identity",
+    "imports",
+    "instruments",
+    "operations",
+    "portfolios",
+    "pricing",
+    "shared",
+    "apps",
+    "apps.api",
+    "apps.api.routes",
+    "apps.worker",
+]
+package-dir = { "" = "src", "apps" = "apps" }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "src"
+files = ["apps", "src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

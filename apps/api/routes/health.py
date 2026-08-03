@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shared.database import check_database, get_db_session
+
+router = APIRouter(prefix="/health", tags=["health"])
+
+
+class HealthResponse(BaseModel):
+    """Health status returned by liveness and readiness probes."""
+
+    status: Literal["ok"]
+
+
+@router.get(
+    "/live",
+    response_model=HealthResponse,
+    summary="Check whether the API process is alive",
+)
+async def live() -> HealthResponse:
+    return HealthResponse(status="ok")
+
+
+@router.get(
+    "/ready",
+    response_model=HealthResponse,
+    summary="Check whether the API can reach PostgreSQL",
+)
+async def ready(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> HealthResponse:
+    try:
+        await check_database(session)
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is unavailable",
+        ) from exc
+    return HealthResponse(status="ok")

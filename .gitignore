@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Build
+build/
+dist/
+*.egg-info/
+cpp/build/
+*.so
+*.dylib
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# User financial data
+data/
+uploads/
+private/
+fixtures/private/
+*.broker-report.pdf
+*.bank-statement.pdf
+
+# Local project and AI-agent documentation
+# Keep these files on this computer; do not include them in a future repository.
+README.md
+AGENTS.md
+docs/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
