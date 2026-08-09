@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.routes.common import not_found
@@ -67,6 +67,27 @@ WORKFLOW_RESPONSES: dict[int | str, dict[str, Any]] = {
     },
     **NOT_FOUND_RESPONSE,
 }
+RESOLUTION_EXAMPLES = {
+    "exclude": {
+        "summary": "Exclude a non-operation row",
+        "value": {"action": "exclude", "note": "Synthetic report total row"},
+    },
+    "match_instrument": {
+        "summary": "Map an ambiguous row to a canonical instrument",
+        "value": {
+            "action": "match_instrument",
+            "instrument_id": "33333333-3333-4333-8333-333333333333",
+            "note": "Verified against the synthetic symbol",
+        },
+    },
+    "allow_duplicate": {
+        "summary": "Explicitly accept a reviewed economic duplicate",
+        "value": {
+            "action": "allow_duplicate",
+            "note": "Distinct synthetic fill with the same economic fields",
+        },
+    },
+}
 
 
 @router.post(
@@ -75,13 +96,35 @@ WORKFLOW_RESPONSES: dict[int | str, dict[str, Any]] = {
     status_code=status.HTTP_201_CREATED,
     responses=UPLOAD_RESPONSES,
     summary="Upload an import file into traceable staging",
+    description=(
+        "Streams a CSV, XLSX, or PDF into protected storage and queues parsing. A repeated SHA-256 "
+        "for the same account returns the existing batch with HTTP 200 and duplicate=true."
+    ),
 )
 async def upload_import_route(
     response: Response,
-    portfolio_id: Annotated[UUID, Form()],
-    account_id: Annotated[UUID, Form()],
-    source_provider: Annotated[SourceProvider, Form()],
-    declared_format: Annotated[ImportFileFormat, Form()],
+    portfolio_id: Annotated[
+        UUID,
+        Form(
+            description="Portfolio that owns the target account",
+            examples=["11111111-1111-4111-8111-111111111111"],
+        ),
+    ],
+    account_id: Annotated[
+        UUID,
+        Form(
+            description="Account that will own confirmed operations",
+            examples=["22222222-2222-4222-8222-222222222222"],
+        ),
+    ],
+    source_provider: Annotated[
+        SourceProvider,
+        Form(description="Registered source provider ID", examples=["universal_broker"]),
+    ],
+    declared_format: Annotated[
+        ImportFileFormat,
+        Form(description="Uploaded file format", examples=["csv"]),
+    ],
     file: Annotated[
         UploadFile,
         File(description="CSV, XLSX, or PDF report stored outside the project tree"),
@@ -116,6 +159,10 @@ async def upload_import_route(
     response_model=ImportStatusResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get import status and processing jobs",
+    description=(
+        "Returns batch counters and parse-job state. Poll this resource while the worker processes "
+        "an uploaded file."
+    ),
 )
 async def get_import_status_route(
     batch_id: UUID,
@@ -138,6 +185,10 @@ async def get_import_status_route(
     response_model=ImportRowListResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="List traceable import staging rows",
+    description=(
+        "Returns raw source data, normalized candidates, diagnostics, and review resolutions. "
+        "These rows have not necessarily affected the ledger."
+    ),
 )
 async def list_import_rows_route(
     batch_id: UUID,
@@ -161,11 +212,18 @@ async def list_import_rows_route(
     response_model=ImportRowResponse,
     responses=WORKFLOW_RESPONSES,
     summary="Resolve or exclude an import staging row",
+    description=(
+        "Records an explicit review decision: exclude the row, map its instrument, or accept a "
+        "known duplicate. The decision is retained for audit."
+    ),
 )
 async def resolve_import_row_route(
     batch_id: UUID,
     row_id: UUID,
-    payload: ImportRowResolutionRequest,
+    payload: Annotated[
+        ImportRowResolutionRequest,
+        Body(openapi_examples=RESOLUTION_EXAMPLES),
+    ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ImportRowResponse:
     row = await resolve_import_row(
@@ -182,6 +240,10 @@ async def resolve_import_row_route(
     response_model=ImportPreviewResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get import diagnostics and preview rows",
+    description=(
+        "Returns review counters, exact currency summaries, and a bounded row preview before "
+        "ledger confirmation."
+    ),
 )
 async def get_import_preview_route(
     batch_id: UUID,
@@ -215,6 +277,10 @@ async def get_import_preview_route(
     response_model=ImportConfirmResponse,
     responses=WORKFLOW_RESPONSES,
     summary="Atomically confirm reviewed import rows",
+    description=(
+        "Validates every included row again and creates all ledger operations in one transaction. "
+        "Repeating a successful confirm returns the same operation IDs."
+    ),
 )
 async def confirm_import_route(
     batch_id: UUID,
@@ -228,6 +294,10 @@ async def confirm_import_route(
     response_model=ImportRollbackResponse,
     responses=WORKFLOW_RESPONSES,
     summary="Rollback only ledger operations created by this import",
+    description=(
+        "Idempotently removes ledger operations created by this batch and restores staging review. "
+        "Manual operations and other batches are unchanged."
+    ),
 )
 async def rollback_import_route(
     batch_id: UUID,
@@ -240,6 +310,7 @@ async def rollback_import_route(
     "",
     response_model=ImportFormatListResponse,
     summary="List registered versioned import adapters",
+    description="Lists adapter IDs, versions, and file formats accepted by the current process.",
 )
 async def list_import_formats_route(
     registry: Annotated[AdapterRegistry, Depends(get_adapter_registry)],

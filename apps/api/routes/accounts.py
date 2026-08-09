@@ -35,6 +35,7 @@ NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status_code=status.HTTP_201_CREATED,
     responses=NOT_FOUND_RESPONSE,
     summary="Create an account in a portfolio",
+    description="Creates a broker, bank, or CEX account owned by the selected portfolio.",
 )
 async def create_account_route(
     portfolio_id: UUID,
@@ -58,6 +59,7 @@ async def create_account_route(
     response_model=AccountListResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="List accounts in a portfolio",
+    description="Returns a bounded page of accounts belonging only to the selected portfolio.",
 )
 async def list_accounts_route(
     portfolio_id: UUID,
@@ -85,6 +87,7 @@ async def list_accounts_route(
     response_model=AccountResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get an account",
+    description="Returns one account and its immutable portfolio ownership.",
 )
 async def get_account_route(
     account_id: UUID,
@@ -101,6 +104,7 @@ async def get_account_route(
     response_model=AccountResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Update an account",
+    description="Changes supplied account metadata; omitted fields keep their current values.",
 )
 async def update_account_route(
     account_id: UUID,
@@ -125,6 +129,10 @@ async def update_account_route(
     status_code=status.HTTP_204_NO_CONTENT,
     responses=NOT_FOUND_RESPONSE,
     summary="Delete an account",
+    description=(
+        "Deletes an unused account. Existing ledger, import, or calculation references cause "
+        "a conflict so financial history is not lost."
+    ),
 )
 async def delete_account_route(
     account_id: UUID,

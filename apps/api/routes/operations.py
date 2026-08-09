@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from accounts.service import get_account
@@ -34,6 +34,42 @@ NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
         "description": "Referenced account, instrument, or operation was not found",
     }
 }
+OPERATION_EXAMPLES = {
+    "trade": {
+        "summary": "Manual buy with exact decimal strings",
+        "value": {
+            "portfolio_id": "11111111-1111-4111-8111-111111111111",
+            "account_id": "22222222-2222-4222-8222-222222222222",
+            "operation_type": "trade",
+            "occurred_at": "2026-08-10T12:30:00Z",
+            "time_precision": "second",
+            "payload": {
+                "side": "buy",
+                "instrument_id": "33333333-3333-4333-8333-333333333333",
+                "quantity": "10",
+                "price": "125.50",
+                "price_currency": "USD",
+            },
+            "note": "Synthetic manual example",
+        },
+    },
+    "income": {
+        "summary": "Manual dividend income",
+        "value": {
+            "portfolio_id": "11111111-1111-4111-8111-111111111111",
+            "account_id": "22222222-2222-4222-8222-222222222222",
+            "operation_type": "income",
+            "occurred_at": "2026-08-10T00:00:00Z",
+            "time_precision": "date",
+            "payload": {
+                "income_type": "dividend",
+                "amount": "12.34",
+                "currency": "USD",
+                "instrument_id": "33333333-3333-4333-8333-333333333333",
+            },
+        },
+    },
+}
 
 
 @router.post(
@@ -42,9 +78,13 @@ NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status_code=status.HTTP_201_CREATED,
     responses=NOT_FOUND_RESPONSE,
     summary="Create a manual ledger operation",
+    description=(
+        "Appends an immutable manual operation. Corrections are new compensating operations that "
+        "reference an existing operation and include an audit note."
+    ),
 )
 async def create_operation_route(
-    payload: OperationCreate,
+    payload: Annotated[OperationCreate, Body(openapi_examples=OPERATION_EXAMPLES)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> OperationResponse:
     account = await get_account(session, payload.account_id)
@@ -79,6 +119,10 @@ async def create_operation_route(
     "",
     response_model=OperationListResponse,
     summary="List and filter ledger operations",
+    description=(
+        "Returns immutable ledger entries ordered by occurrence time and ID. Optional filters are "
+        "combined, and date bounds are inclusive."
+    ),
 )
 async def list_operations_route(
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -124,6 +168,7 @@ async def list_operations_route(
     response_model=OperationResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get a ledger operation",
+    description="Returns one operation with its source provenance and typed payload.",
 )
 async def get_operation_route(
     operation_id: UUID,

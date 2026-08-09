@@ -23,6 +23,9 @@ class HealthResponse(BaseModel):
     "/live",
     response_model=HealthResponse,
     summary="Check whether the API process is alive",
+    description=(
+        "Returns success when the API process can serve requests; no database check is made."
+    ),
 )
 async def live() -> HealthResponse:
     return HealthResponse(status="ok")
@@ -38,6 +41,7 @@ async def live() -> HealthResponse:
         }
     },
     summary="Check whether the API can reach PostgreSQL",
+    description="Runs a minimal PostgreSQL query and returns 503 when the database is unavailable.",
 )
 async def ready(
     session: Annotated[AsyncSession, Depends(get_db_session)],

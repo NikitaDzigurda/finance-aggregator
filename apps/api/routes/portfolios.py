@@ -38,6 +38,7 @@ NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     response_model=PortfolioResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a portfolio",
+    description="Creates the top-level reporting container and its base currency.",
 )
 async def create_portfolio_route(
     payload: PortfolioCreate,
@@ -57,6 +58,7 @@ async def create_portfolio_route(
     "",
     response_model=PortfolioListResponse,
     summary="List portfolios",
+    description="Returns a bounded page of portfolios ordered by creation time and ID.",
 )
 async def list_portfolios_route(
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -76,6 +78,7 @@ async def list_portfolios_route(
     response_model=PortfolioResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get a portfolio",
+    description="Returns one portfolio without expanding its accounts or calculated positions.",
 )
 async def get_portfolio_route(
     portfolio_id: UUID,
@@ -92,6 +95,7 @@ async def get_portfolio_route(
     response_model=PortfolioResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Update a portfolio",
+    description="Changes supplied mutable fields; omitted fields keep their current values.",
 )
 async def update_portfolio_route(
     portfolio_id: UUID,
@@ -116,6 +120,10 @@ async def update_portfolio_route(
     status_code=status.HTTP_204_NO_CONTENT,
     responses=NOT_FOUND_RESPONSE,
     summary="Delete a portfolio and its accounts",
+    description=(
+        "Deletes the portfolio and unused child accounts. Ledger, import, price, or snapshot "
+        "references cause a conflict instead of cascading financial history."
+    ),
 )
 async def delete_portfolio_route(
     portfolio_id: UUID,

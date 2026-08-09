@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.routes.common import commit_or_conflict, not_found
@@ -37,6 +37,37 @@ CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
         "description": "An identifier is already assigned to another instrument",
     }
 }
+INSTRUMENT_EXAMPLES = {
+    "listed_security": {
+        "summary": "Listed security with scoped ticker",
+        "value": {
+            "name": "Synthetic Equity",
+            "instrument_type": "stock",
+            "currency": "USD",
+            "identifiers": [
+                {
+                    "identifier_type": "ticker",
+                    "value": "SYN",
+                    "exchange": "XNAS",
+                }
+            ],
+        },
+    },
+    "crypto_asset": {
+        "summary": "Crypto asset with stable asset code",
+        "value": {
+            "name": "Synthetic Coin",
+            "instrument_type": "crypto_asset",
+            "currency": "USD",
+            "identifiers": [
+                {
+                    "identifier_type": "crypto_asset_code",
+                    "value": "SYNCOIN",
+                }
+            ],
+        },
+    },
+}
 
 
 @router.post(
@@ -45,9 +76,13 @@ CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
     status_code=status.HTTP_201_CREATED,
     responses=CONFLICT_RESPONSE,
     summary="Create an instrument with stable identifiers",
+    description=(
+        "Creates one canonical instrument. Tickers require an exchange, provider codes require "
+        "a provider, and identifiers cannot already belong to another instrument."
+    ),
 )
 async def create_instrument_route(
-    payload: InstrumentCreate,
+    payload: Annotated[InstrumentCreate, Body(openapi_examples=INSTRUMENT_EXAMPLES)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> InstrumentResponse:
     instrument = await create_instrument(session, payload)
@@ -64,6 +99,7 @@ async def create_instrument_route(
     "",
     response_model=InstrumentListResponse,
     summary="List instruments",
+    description="Returns a bounded page of canonical instruments with all stored identifiers.",
 )
 async def list_instruments_route(
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -83,6 +119,7 @@ async def list_instruments_route(
     response_model=InstrumentResponse,
     responses=NOT_FOUND_RESPONSE,
     summary="Get an instrument",
+    description="Returns one canonical instrument and its stable identifier set.",
 )
 async def get_instrument_route(
     instrument_id: UUID,
@@ -99,6 +136,10 @@ async def get_instrument_route(
     response_model=InstrumentResponse,
     responses=NOT_FOUND_RESPONSE | CONFLICT_RESPONSE,
     summary="Update an instrument",
+    description=(
+        "Changes supplied fields. When identifiers are supplied, the entire identifier set is "
+        "validated and replaced atomically."
+    ),
 )
 async def update_instrument_route(
     instrument_id: UUID,
@@ -123,6 +164,10 @@ async def update_instrument_route(
     status_code=status.HTTP_204_NO_CONTENT,
     responses=NOT_FOUND_RESPONSE | CONFLICT_RESPONSE,
     summary="Delete an instrument",
+    description=(
+        "Deletes an unused instrument. Ledger or price references cause a conflict so historical "
+        "data remains traceable."
+    ),
 )
 async def delete_instrument_route(
     instrument_id: UUID,
