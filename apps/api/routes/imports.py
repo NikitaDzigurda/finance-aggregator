@@ -11,11 +11,14 @@ from imports.adapters import AdapterRegistry, get_adapter_registry
 from imports.models import ImportFileFormat
 from imports.schemas import (
     ImportBatchResponse,
+    ImportConfirmResponse,
     ImportFormatListResponse,
     ImportFormatResponse,
     ImportJobResponse,
     ImportPreviewResponse,
+    ImportRollbackResponse,
     ImportRowListResponse,
+    ImportRowResolutionRequest,
     ImportRowResponse,
     ImportStatusResponse,
     ImportUploadResponse,
@@ -24,10 +27,12 @@ from imports.schemas import (
 from imports.service import (
     create_import_batch,
     get_import_batch,
+    get_import_preview_summary,
     list_import_formats,
     list_import_rows,
 )
 from imports.storage import ObjectStorage, get_object_storage
+from imports.workflow import confirm_import, resolve_import_row, rollback_import
 from shared.database import get_db_session
 from shared.errors import ErrorResponse
 
@@ -52,6 +57,13 @@ UPLOAD_RESPONSES: dict[int | str, dict[str, Any]] = {
     status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {
         "model": ErrorResponse,
         "description": "The file media type is not allowed",
+    },
+    **NOT_FOUND_RESPONSE,
+}
+WORKFLOW_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_409_CONFLICT: {
+        "model": ErrorResponse,
+        "description": "Import state, resolution, duplicate, or ledger dependency conflicts",
     },
     **NOT_FOUND_RESPONSE,
 }
@@ -144,6 +156,27 @@ async def list_import_rows_route(
     )
 
 
+@router.patch(
+    "/{batch_id}/rows/{row_id}",
+    response_model=ImportRowResponse,
+    responses=WORKFLOW_RESPONSES,
+    summary="Resolve or exclude an import staging row",
+)
+async def resolve_import_row_route(
+    batch_id: UUID,
+    row_id: UUID,
+    payload: ImportRowResolutionRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ImportRowResponse:
+    row = await resolve_import_row(
+        session,
+        batch_id=batch_id,
+        row_id=row_id,
+        request=payload,
+    )
+    return ImportRowResponse.model_validate(row)
+
+
 @router.get(
     "/{batch_id}/preview",
     response_model=ImportPreviewResponse,
@@ -160,6 +193,7 @@ async def get_import_preview_route(
     if batch is None:
         not_found("import_batch")
     rows = await list_import_rows(session, batch_id, limit=limit, offset=offset)
+    summary = await get_import_preview_summary(session, batch_id)
     return ImportPreviewResponse(
         batch_id=batch.id,
         status=batch.status,
@@ -169,10 +203,37 @@ async def get_import_preview_route(
         error_rows=batch.error_rows,
         duplicate_rows=batch.duplicate_rows,
         excluded_rows=batch.excluded_rows,
+        summary=summary,
         items=[ImportRowResponse.model_validate(row) for row in rows],
         limit=limit,
         offset=offset,
     )
+
+
+@router.post(
+    "/{batch_id}/confirm",
+    response_model=ImportConfirmResponse,
+    responses=WORKFLOW_RESPONSES,
+    summary="Atomically confirm reviewed import rows",
+)
+async def confirm_import_route(
+    batch_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ImportConfirmResponse:
+    return await confirm_import(session, batch_id=batch_id)
+
+
+@router.post(
+    "/{batch_id}/rollback",
+    response_model=ImportRollbackResponse,
+    responses=WORKFLOW_RESPONSES,
+    summary="Rollback only ledger operations created by this import",
+)
+async def rollback_import_route(
+    batch_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ImportRollbackResponse:
+    return await rollback_import(session, batch_id=batch_id)
 
 
 @formats_router.get(

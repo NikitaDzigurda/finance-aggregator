@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import cache
 from typing import BinaryIO, Protocol
 
 from imports.models import ImportCompleteness, ImportFileFormat, ImportRowStatus
@@ -32,6 +33,7 @@ class ParsedRow:
     raw_data: dict[str, object]
     normalized_candidate: dict[str, object] | None = None
     status: ImportRowStatus | None = None
+    fingerprint: str | None = None
     source_page: int | None = None
     source_sheet: str | None = None
     source_row_number: int | None = None
@@ -107,8 +109,10 @@ class AdapterRegistry:
         )
 
 
-_registry = AdapterRegistry()
-
-
+@cache
 def get_adapter_registry() -> AdapterRegistry:
-    return _registry
+    from imports.universal_broker_csv import UniversalBrokerCsvAdapter
+
+    registry = AdapterRegistry()
+    registry.register(UniversalBrokerCsvAdapter())
+    return registry

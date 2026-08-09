@@ -16,6 +16,8 @@ from imports.adapters import (
     ParsedRow,
     ValidationResult,
 )
+from imports.deduplication import apply_import_deduplication
+from imports.instrument_matching import resolve_import_instruments
 from imports.models import (
     ImportBatchModel,
     ImportRowModel,
@@ -56,6 +58,8 @@ async def process_import_batch(
         size_bytes = batch.file_size_bytes
         sha256 = batch.sha256
         source_provider = batch.source_provider
+        portfolio_id = batch.portfolio_id
+        account_id = batch.account_id
 
     try:
         stream = await asyncio.to_thread(storage.open, storage_key)
@@ -97,7 +101,21 @@ async def process_import_batch(
     finally:
         await asyncio.to_thread(stream.close)
 
-    prepared_rows = [_prepare_row(batch_id, row) for row in validated.rows]
+    async with sessions() as session:
+        resolved_rows = await resolve_import_instruments(
+            session,
+            validated.rows,
+            portfolio_id=portfolio_id,
+            account_id=account_id,
+        )
+        deduplicated_rows = await apply_import_deduplication(
+            session,
+            resolved_rows,
+            account_id=account_id,
+            source_provider=source_provider,
+        )
+
+    prepared_rows = [_prepare_row(batch_id, row) for row in deduplicated_rows]
     counts = Counter(row.status for row in prepared_rows)
     async with sessions.begin() as session:
         batch = await session.get(ImportBatchModel, batch_id, with_for_update=True)
@@ -212,6 +230,7 @@ def _prepare_row(batch_id: UUID, row: ParsedRow) -> ImportRowModel:
         status=status,
         warnings=warnings,
         errors=errors,
+        fingerprint=row.fingerprint,
     )
 
 

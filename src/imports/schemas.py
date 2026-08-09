@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -18,6 +18,11 @@ from imports.models import (
 )
 from shared.exact import AwareDateTime
 
+type ExactSummaryValue = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"),
+]
+
 type SourceProvider = Annotated[
     str,
     StringConstraints(
@@ -27,6 +32,10 @@ type SourceProvider = Annotated[
         max_length=100,
         pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
     ),
+]
+type ResolutionNote = Annotated[
+    str,
+    StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=1000),
 ]
 
 
@@ -55,6 +64,7 @@ class ImportRowResponse(BaseModel):
     status: ImportRowStatus
     warnings: list[dict[str, object]]
     errors: list[dict[str, object]]
+    fingerprint: str | None
     matched_operation_id: UUID | None
     resolutions: list[ImportResolutionResponse]
     created_at: AwareDateTime
@@ -118,6 +128,21 @@ class ImportRowListResponse(BaseModel):
     offset: int
 
 
+class ImportPreviewCurrencySummary(BaseModel):
+    trade_buys: int = 0
+    trade_sells: int = 0
+    income: ExactSummaryValue = "0"
+    fees: ExactSummaryValue = "0"
+    taxes: ExactSummaryValue = "0"
+    cash_in: ExactSummaryValue = "0"
+    cash_out: ExactSummaryValue = "0"
+
+
+class ImportPreviewSummary(BaseModel):
+    operation_counts: dict[str, int]
+    currency_totals: dict[str, ImportPreviewCurrencySummary]
+
+
 class ImportPreviewResponse(BaseModel):
     batch_id: UUID
     status: ImportStatus
@@ -127,6 +152,7 @@ class ImportPreviewResponse(BaseModel):
     error_rows: int
     duplicate_rows: int
     excluded_rows: int
+    summary: ImportPreviewSummary
     items: list[ImportRowResponse]
     limit: int
     offset: int
@@ -140,3 +166,46 @@ class ImportFormatResponse(BaseModel):
 
 class ImportFormatListResponse(BaseModel):
     items: list[ImportFormatResponse]
+
+
+class ExcludeImportRowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["exclude"]
+    note: ResolutionNote | None = None
+
+
+class MatchImportInstrumentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["match_instrument"]
+    instrument_id: UUID
+    note: ResolutionNote | None = None
+
+
+class AllowImportDuplicateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["allow_duplicate"]
+    note: ResolutionNote
+
+
+type ImportRowResolutionRequest = Annotated[
+    ExcludeImportRowRequest | MatchImportInstrumentRequest | AllowImportDuplicateRequest,
+    Field(discriminator="action"),
+]
+
+
+class ImportConfirmResponse(BaseModel):
+    batch_id: UUID
+    status: ImportStatus
+    operation_count: int
+    operation_ids: list[UUID]
+    idempotent: bool
+
+
+class ImportRollbackResponse(BaseModel):
+    batch_id: UUID
+    status: ImportStatus
+    rolled_back_operations: int
+    idempotent: bool

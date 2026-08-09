@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -68,6 +69,21 @@ class OperationModel(TimestampMixin, Base):
             name="operation_import_source_batch",
         ),
         CheckConstraint(
+            "(source_type = 'manual' AND fingerprint IS NULL "
+            "AND deduplication_key IS NULL) OR "
+            "(source_type <> 'manual' AND fingerprint IS NOT NULL "
+            "AND deduplication_key IS NOT NULL)",
+            name="operation_source_fingerprint",
+        ),
+        CheckConstraint(
+            "fingerprint IS NULL OR fingerprint ~ '^[0-9a-f]{64}$'",
+            name="operation_fingerprint_format",
+        ),
+        CheckConstraint(
+            "deduplication_key IS NULL OR deduplication_key ~ '^[0-9a-f]{64}$'",
+            name="operation_deduplication_key_format",
+        ),
+        CheckConstraint(
             "correction_of_operation_id IS NULL OR correction_of_operation_id <> id",
             name="operation_not_self_correction",
         ),
@@ -81,6 +97,14 @@ class OperationModel(TimestampMixin, Base):
         Index("ix_operations_account_occurred_at", "account_id", "occurred_at"),
         Index("ix_operations_type_occurred_at", "operation_type", "occurred_at"),
         Index("ix_operations_instrument_occurred_at", "instrument_id", "occurred_at"),
+        Index("ix_operations_account_fingerprint", "account_id", "fingerprint"),
+        Index(
+            "uq_operations_account_deduplication_key",
+            "account_id",
+            "deduplication_key",
+            unique=True,
+            postgresql_where=text("deduplication_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -123,6 +147,8 @@ class OperationModel(TimestampMixin, Base):
     )
     source_operation_id: Mapped[str | None] = mapped_column(String(256))
     source_row_number: Mapped[int | None] = mapped_column(Integer)
+    fingerprint: Mapped[str | None] = mapped_column(String(64))
+    deduplication_key: Mapped[str | None] = mapped_column(String(64))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     instrument_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),

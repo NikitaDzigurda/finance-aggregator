@@ -9,46 +9,14 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from apps.api.main import create_app
-from imports.adapters import (
-    AdapterRegistry,
-    DetectionResult,
-    ImportDocument,
-    ParsedImport,
-    ParsedRow,
-    ValidationResult,
-)
+from imports.adapters import get_adapter_registry
 from imports.jobs import claim_next_job, finish_job
-from imports.models import ImportBatchModel, ImportFileFormat
+from imports.models import ImportBatchModel
 from imports.processor import process_import_batch
 from imports.storage import LocalObjectStorage, get_object_storage
+from instruments.models import InstrumentModel
 from portfolios.models import PortfolioModel
 from shared.database import get_db_session
-
-
-class _WorkerTestAdapter:
-    format_id = "universal_broker"
-    version = "1.0"
-    supported_file_formats = frozenset({ImportFileFormat.CSV})
-
-    def detect(self, document: ImportDocument) -> DetectionResult:
-        return DetectionResult(matched=document.stream.read(4) == b"Date")
-
-    def parse(self, document: ImportDocument) -> ParsedImport:
-        del document
-        return ParsedImport(
-            rows=(
-                ParsedRow(
-                    sequence_number=1,
-                    source_row_number=2,
-                    raw_data={"Date": "2026-08-03", "Type": "Buy"},
-                    normalized_candidate={"operation_type": "trade"},
-                    warnings=({"code": "instrument_match_required"},),
-                ),
-            )
-        )
-
-    def validate(self, parsed: ParsedImport) -> ValidationResult:
-        return ValidationResult(rows=parsed.rows)
 
 
 @pytest.mark.postgres
@@ -76,6 +44,7 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
     transport = ASGITransport(app=application)
     suffix = uuid4().hex[:8].upper()
     portfolio_id: UUID | None = None
+    instrument_id: UUID | None = None
     batch_id: UUID | None = None
     storage_key: str | None = None
 
@@ -93,13 +62,52 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             )
             assert account_response.status_code == 201
             account_id = account_response.json()["id"]
+            isin = f"US{suffix}X1"
+            ticker = f"S{suffix}"
+            instrument_response = await client.post(
+                "/api/v1/instruments",
+                json={
+                    "name": "Synthetic equity",
+                    "instrument_type": "stock",
+                    "currency": "USD",
+                    "identifiers": [
+                        {"identifier_type": "isin", "value": isin},
+                        {
+                            "identifier_type": "ticker",
+                            "value": ticker,
+                            "exchange": "XNAS",
+                        },
+                    ],
+                },
+            )
+            assert instrument_response.status_code == 201, instrument_response.text
+            instrument_id = UUID(instrument_response.json()["id"])
+
+            formats_response = await client.get("/api/v1/import-formats")
+            assert formats_response.status_code == 200
+            assert formats_response.json() == {
+                "items": [
+                    {
+                        "format_id": "universal_broker",
+                        "version": "1.0",
+                        "supported_file_formats": ["csv"],
+                    }
+                ]
+            }
             form = {
                 "portfolio_id": str(portfolio_id),
                 "account_id": account_id,
                 "source_provider": "universal_broker",
                 "declared_format": "csv",
             }
-            content = b"Date,Type,ExternalId\n2026-08-03,Buy,SYN-1\n"
+            content = (
+                "Date;Type;Symbol;ISIN;Quantity;Price;Amount;Currency;Fee;"
+                "FeeCurrency;Tax;AccruedInterest;Exchange;ExternalId;Note\n"
+                f"03.08.2026;Buy;{ticker};{isin};10,5;125,50;;USD;1,25;USD;"
+                "2,50;0;XNAS;SYN-1;Synthetic matched row\n"
+                "2026-08-04;Dividend;UNKNOWN;GB0000000001;;;12,75;EUR;0;EUR;"
+                "0;0;XPAR;SYN-2;Synthetic unknown instrument\n"
+            ).encode()
 
             upload_response = await client.post(
                 "/api/v1/imports",
@@ -152,12 +160,10 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
         async with sessions() as session:
             assert await claim_next_job(session, worker_id="worker-two") is None
 
-        registry = AdapterRegistry()
-        registry.register(_WorkerTestAdapter())
         await process_import_batch(
             sessions,
             storage,
-            registry,
+            get_adapter_registry(),
             batch_id=batch_id,
         )
         async with sessions() as session:
@@ -172,17 +178,75 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             processed_status = await client.get(f"/api/v1/imports/{batch_id}")
             assert processed_status.status_code == 200
             assert processed_status.json()["batch"]["status"] == "awaiting_review"
+            assert processed_status.json()["batch"]["total_rows"] == 4
+            assert processed_status.json()["batch"]["ready_rows"] == 3
+            assert processed_status.json()["batch"]["warning_rows"] == 1
             assert processed_status.json()["jobs"][0]["status"] == "succeeded"
             processed_preview = await client.get(f"/api/v1/imports/{batch_id}/preview")
             assert processed_preview.status_code == 200
             assert processed_preview.json()["warning_rows"] == 1
-            assert processed_preview.json()["items"][0]["raw_data"] == {
-                "Date": "2026-08-03",
-                "Type": "Buy",
-            }
+            assert processed_preview.json()["items"][0]["raw_data"]["Date"] == "03.08.2026"
             assert processed_preview.json()["items"][0]["normalized_candidate"] == {
-                "operation_type": "trade"
+                "operation_type": "trade",
+                "occurred_at": "2026-08-03T00:00:00Z",
+                "time_precision": "date",
+                "source_operation_id": "SYN-1",
+                "note": "Synthetic matched row",
+                "payload": {
+                    "side": "buy",
+                    "instrument_id": str(instrument_id),
+                    "quantity": "10.5",
+                    "price": "125.50",
+                    "price_currency": "USD",
+                },
             }
+            assert processed_preview.json()["items"][3]["warnings"] == [
+                {
+                    "code": "instrument_match_required",
+                    "message": "No canonical instrument matched the supplied identifiers",
+                }
+            ]
+            assert processed_preview.json()["summary"] == {
+                "operation_counts": {"fee": 1, "income": 1, "tax": 1, "trade": 1},
+                "currency_totals": {
+                    "EUR": {
+                        "trade_buys": 0,
+                        "trade_sells": 0,
+                        "income": "12.75",
+                        "fees": "0",
+                        "taxes": "0",
+                        "cash_in": "0",
+                        "cash_out": "0",
+                    },
+                    "USD": {
+                        "trade_buys": 1,
+                        "trade_sells": 0,
+                        "income": "0",
+                        "fees": "1.25",
+                        "taxes": "2.50",
+                        "cash_in": "0",
+                        "cash_out": "0",
+                    },
+                },
+            }
+
+            unknown_row_id = processed_preview.json()["items"][3]["id"]
+            resolution_response = await client.patch(
+                f"/api/v1/imports/{batch_id}/rows/{unknown_row_id}",
+                json={
+                    "action": "match_instrument",
+                    "instrument_id": str(instrument_id),
+                    "note": "Synthetic explicit match",
+                },
+            )
+            assert resolution_response.status_code == 200, resolution_response.text
+            assert resolution_response.json()["status"] == "ready"
+            assert resolution_response.json()["resolutions"][0]["resolution_type"] == (
+                "instrument_match"
+            )
+            resolved_status = await client.get(f"/api/v1/imports/{batch_id}")
+            assert resolved_status.json()["batch"]["status"] == "ready_to_commit"
+            assert resolved_status.json()["batch"]["ready_rows"] == 4
     finally:
         async with sessions.begin() as session:
             if batch_id is not None:
@@ -192,6 +256,10 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             if portfolio_id is not None:
                 await session.execute(
                     delete(PortfolioModel).where(PortfolioModel.id == portfolio_id)
+                )
+            if instrument_id is not None:
+                await session.execute(
+                    delete(InstrumentModel).where(InstrumentModel.id == instrument_id)
                 )
         if storage_key is not None:
             storage.delete(storage_key)

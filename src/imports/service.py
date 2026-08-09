@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import PurePosixPath
 from typing import BinaryIO
 from uuid import UUID
@@ -19,7 +22,9 @@ from imports.models import (
     ImportJobModel,
     ImportJobType,
     ImportRowModel,
+    ImportRowStatus,
 )
+from imports.schemas import ImportPreviewCurrencySummary, ImportPreviewSummary
 from imports.storage import (
     EmptyFileError,
     FileTooLargeError,
@@ -258,3 +263,101 @@ async def list_import_rows(
 
 def list_import_formats(registry: AdapterRegistry) -> tuple[AdapterDescriptor, ...]:
     return registry.descriptors()
+
+
+@dataclass(slots=True)
+class _CurrencyAccumulator:
+    trade_buys: int = 0
+    trade_sells: int = 0
+    income: Decimal = Decimal(0)
+    fees: Decimal = Decimal(0)
+    taxes: Decimal = Decimal(0)
+    cash_in: Decimal = Decimal(0)
+    cash_out: Decimal = Decimal(0)
+
+
+async def get_import_preview_summary(
+    session: AsyncSession,
+    batch_id: UUID,
+) -> ImportPreviewSummary:
+    result = await session.execute(
+        select(ImportRowModel.normalized_candidate).where(
+            ImportRowModel.batch_id == batch_id,
+            ImportRowModel.status.in_(
+                [
+                    ImportRowStatus.READY,
+                    ImportRowStatus.WARNING,
+                    ImportRowStatus.COMMITTED,
+                ]
+            ),
+            ImportRowModel.normalized_candidate.is_not(None),
+        )
+    )
+    operation_counts: Counter[str] = Counter()
+    currency_totals: dict[str, _CurrencyAccumulator] = {}
+    with localcontext() as context:
+        context.prec = 80
+        for (candidate,) in result.all():
+            if not isinstance(candidate, dict):
+                continue
+            operation_type = candidate.get("operation_type")
+            payload = candidate.get("payload")
+            if not isinstance(operation_type, str) or not isinstance(payload, dict):
+                continue
+            operation_counts[operation_type] += 1
+            _add_candidate_to_summary(operation_type, payload, currency_totals)
+    return ImportPreviewSummary(
+        operation_counts=dict(sorted(operation_counts.items())),
+        currency_totals={
+            currency: ImportPreviewCurrencySummary(
+                trade_buys=totals.trade_buys,
+                trade_sells=totals.trade_sells,
+                income=format(totals.income, "f"),
+                fees=format(totals.fees, "f"),
+                taxes=format(totals.taxes, "f"),
+                cash_in=format(totals.cash_in, "f"),
+                cash_out=format(totals.cash_out, "f"),
+            )
+            for currency, totals in sorted(currency_totals.items())
+        },
+    )
+
+
+def _add_candidate_to_summary(
+    operation_type: str,
+    payload: dict[str, object],
+    totals_by_currency: dict[str, _CurrencyAccumulator],
+) -> None:
+    currency_field: str | None = None
+    amount_field: str | None = None
+    accumulator_field: str | None = None
+    if operation_type == "trade":
+        currency_field = "price_currency"
+    elif operation_type == "income":
+        currency_field, amount_field, accumulator_field = "currency", "amount", "income"
+    elif operation_type == "fee":
+        currency_field, amount_field, accumulator_field = "currency", "amount", "fees"
+    elif operation_type == "tax":
+        currency_field, amount_field, accumulator_field = "currency", "amount", "taxes"
+    elif operation_type == "cash_movement":
+        currency_field, amount_field = "currency", "amount"
+        accumulator_field = "cash_in" if payload.get("direction") == "deposit" else "cash_out"
+    if currency_field is None:
+        return
+    currency = payload.get(currency_field)
+    if not isinstance(currency, str):
+        return
+    totals = totals_by_currency.setdefault(currency, _CurrencyAccumulator())
+    if operation_type == "trade":
+        if payload.get("side") == "buy":
+            totals.trade_buys += 1
+        elif payload.get("side") == "sell":
+            totals.trade_sells += 1
+        return
+    amount = payload.get(amount_field) if amount_field is not None else None
+    if not isinstance(amount, str) or accumulator_field is None:
+        return
+    try:
+        setattr(totals, accumulator_field, getattr(totals, accumulator_field) + Decimal(amount))
+    except InvalidOperation:
+        return
