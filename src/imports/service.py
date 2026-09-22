@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
@@ -14,15 +15,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from accounts.models import AccountType
 from accounts.service import get_account
 from imports.adapters import AdapterDescriptor, AdapterRegistry
 from imports.models import (
+    ImportBatchFileModel,
     ImportBatchModel,
+    ImportCompleteness,
     ImportFileFormat,
     ImportJobModel,
     ImportJobType,
+    ImportReconciliationStatus,
     ImportRowModel,
     ImportRowStatus,
+    ImportStatus,
 )
 from imports.schemas import ImportPreviewCurrencySummary, ImportPreviewSummary
 from imports.storage import (
@@ -32,11 +38,14 @@ from imports.storage import (
     StorageError,
     StoredObject,
 )
+from imports.xml_security import XmlSecurityError, XmlSecurityLimits, validate_xml_document
+from shared.config import get_settings
 from shared.errors import ApiErrorException
 
 _FORMAT_SUFFIXES = {
     ImportFileFormat.CSV: ".csv",
     ImportFileFormat.XLSX: ".xlsx",
+    ImportFileFormat.XML: ".xml",
     ImportFileFormat.PDF: ".pdf",
 }
 _CONTENT_TYPES = {
@@ -49,8 +58,37 @@ _CONTENT_TYPES = {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         }
     ),
+    ImportFileFormat.XML: frozenset(
+        {
+            "application/octet-stream",
+            "application/xml",
+            "text/xml",
+        }
+    ),
     ImportFileFormat.PDF: frozenset({"application/octet-stream", "application/pdf"}),
 }
+_MAX_IMPORT_FILES = 8
+_PROVIDER_ACCOUNT_TYPES = {
+    "tbank_broker_xlsx": AccountType.BROKER,
+    "alfa_broker_xml_import": AccountType.BROKER,
+    "universal_broker": AccountType.BROKER,
+    "bybit_spot_csv_bundle": AccountType.CEX,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ImportUploadPart:
+    filename: str | None
+    content_type: str | None
+    source: BinaryIO
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioImportQualitySummary:
+    period_limited_batch_count: int
+    unknown_completeness_batch_count: int
+    reconciliation_mismatch_batch_count: int
+    unresolved_review_row_count: int
 
 
 def safe_original_filename(filename: str | None) -> str:
@@ -105,6 +143,29 @@ def validate_file_signature(source: BinaryIO, declared_format: ImportFileFormat)
         valid = prefix.startswith(b"PK\x03\x04")
     elif declared_format == ImportFileFormat.CSV:
         valid = b"\x00" not in prefix
+    elif declared_format == ImportFileFormat.XML:
+        settings = get_settings()
+        try:
+            validate_xml_document(
+                source,
+                limits=XmlSecurityLimits(
+                    max_size_bytes=settings.import_max_file_size_bytes,
+                    max_depth=settings.import_xml_max_depth,
+                    max_elements=settings.import_xml_max_elements,
+                    max_value_length=settings.import_xml_max_value_length,
+                ),
+            )
+        except XmlSecurityError as exc:
+            error_status = (
+                status.HTTP_413_CONTENT_TOO_LARGE
+                if exc.code == "import_file_too_large"
+                else status.HTTP_422_UNPROCESSABLE_CONTENT
+            )
+            raise ApiErrorException(
+                status_code=error_status,
+                code=exc.code,
+                message=exc.message,
+            ) from exc
     if not valid:
         raise ApiErrorException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -125,6 +186,33 @@ async def create_import_batch(
     content_type: str | None,
     source: BinaryIO,
 ) -> tuple[ImportBatchModel, bool]:
+    return await create_import_batch_documents(
+        session,
+        storage,
+        portfolio_id=portfolio_id,
+        account_id=account_id,
+        source_provider=source_provider,
+        declared_format=declared_format,
+        uploads=(
+            ImportUploadPart(
+                filename=filename,
+                content_type=content_type,
+                source=source,
+            ),
+        ),
+    )
+
+
+async def create_import_batch_documents(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    *,
+    portfolio_id: UUID,
+    account_id: UUID,
+    source_provider: str,
+    declared_format: ImportFileFormat,
+    uploads: tuple[ImportUploadPart, ...],
+) -> tuple[ImportBatchModel, bool]:
     account = await get_account(session, account_id)
     if account is None or account.portfolio_id != portfolio_id:
         raise ApiErrorException(
@@ -132,32 +220,69 @@ async def create_import_batch(
             code="account_not_found",
             message="Account was not found",
         )
+    expected_account_type = _PROVIDER_ACCOUNT_TYPES.get(source_provider)
+    if expected_account_type is not None and account.account_type is not expected_account_type:
+        raise ApiErrorException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="import_account_type_mismatch",
+            message=(
+                "Selected account type is incompatible with the chosen import source"
+            ),
+        )
 
-    original_filename = safe_original_filename(filename)
-    suffix = validate_upload_metadata(
-        filename=original_filename,
-        content_type=content_type,
-        declared_format=declared_format,
-    )
-    validate_file_signature(source, declared_format)
-    stored = await _store_file(storage, source, suffix=suffix)
+    if not uploads or len(uploads) > _MAX_IMPORT_FILES:
+        raise ApiErrorException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="import_file_count_invalid",
+            message=f"Import must contain between 1 and {_MAX_IMPORT_FILES} files",
+        )
+
+    prepared: list[tuple[str, str, StoredObject]] = []
+    try:
+        for upload in uploads:
+            original_filename = safe_original_filename(upload.filename)
+            suffix = validate_upload_metadata(
+                filename=original_filename,
+                content_type=upload.content_type,
+                declared_format=declared_format,
+            )
+            validate_file_signature(upload.source, declared_format)
+            stored = await _store_file(storage, upload.source, suffix=suffix)
+            prepared.append((original_filename, suffix, stored))
+    except BaseException:
+        await _delete_stored_objects(storage, prepared)
+        raise
+
+    aggregate_sha256 = _batch_sha256(tuple(item[2].sha256 for item in prepared))
     committed = False
 
     try:
-        duplicate = await get_duplicate_import(session, account_id, stored.sha256)
+        duplicate = await get_duplicate_import(session, account_id, aggregate_sha256)
         if duplicate is not None:
-            await asyncio.to_thread(storage.delete, stored.key)
+            await _delete_stored_objects(storage, prepared)
             return duplicate, True
 
+        primary_filename, _, primary_stored = prepared[0]
         batch = ImportBatchModel(
             portfolio_id=portfolio_id,
             account_id=account_id,
             source_provider=source_provider,
             declared_format=declared_format,
-            original_filename=original_filename,
-            storage_key=stored.key,
-            file_size_bytes=stored.size_bytes,
-            sha256=stored.sha256,
+            original_filename=primary_filename,
+            storage_key=primary_stored.key,
+            file_size_bytes=sum(item[2].size_bytes for item in prepared),
+            sha256=aggregate_sha256,
+        )
+        batch.files.extend(
+            ImportBatchFileModel(
+                sequence_number=index,
+                declared_format=declared_format,
+                original_filename=item[0],
+                storage_key=item[2].key,
+                file_size_bytes=item[2].size_bytes,
+                sha256=item[2].sha256,
+            )
+            for index, item in enumerate(prepared, start=1)
         )
         batch.jobs.append(ImportJobModel(job_type=ImportJobType.PARSE_IMPORT))
         session.add(batch)
@@ -165,22 +290,41 @@ async def create_import_batch(
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            duplicate = await get_duplicate_import(session, account_id, stored.sha256)
+            duplicate = await get_duplicate_import(session, account_id, aggregate_sha256)
             if duplicate is None:
                 raise ApiErrorException(
                     status_code=status.HTTP_409_CONFLICT,
                     code="import_conflict",
                     message="Import conflicts with existing data",
                 ) from exc
-            await asyncio.to_thread(storage.delete, stored.key)
+            await _delete_stored_objects(storage, prepared)
             return duplicate, True
         committed = True
-        await session.refresh(batch)
+        await session.refresh(batch, attribute_names=["files", "jobs"])
         return batch, False
     except BaseException:
         if not committed:
-            await asyncio.to_thread(storage.delete, stored.key)
+            await _delete_stored_objects(storage, prepared)
         raise
+
+
+def _batch_sha256(hashes: tuple[str, ...]) -> str:
+    if len(hashes) == 1:
+        return hashes[0]
+    digest = hashlib.sha256()
+    digest.update(b"finance-aggregator-import-bundle-v1\0")
+    for value in sorted(hashes):
+        digest.update(value.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+async def _delete_stored_objects(
+    storage: ObjectStorage,
+    prepared: list[tuple[str, str, StoredObject]],
+) -> None:
+    for _, _, stored in prepared:
+        await asyncio.to_thread(storage.delete, stored.key)
 
 
 async def _store_file(
@@ -226,6 +370,7 @@ async def get_duplicate_import(
         ImportBatchModel.account_id == account_id,
         ImportBatchModel.sha256 == sha256,
     )
+    statement = statement.options(selectinload(ImportBatchModel.files))
     result = await session.scalars(statement)
     return result.first()
 
@@ -237,10 +382,82 @@ async def get_import_batch(
     statement: Select[tuple[ImportBatchModel]] = (
         select(ImportBatchModel)
         .where(ImportBatchModel.id == batch_id)
-        .options(selectinload(ImportBatchModel.jobs))
+        .options(
+            selectinload(ImportBatchModel.files),
+            selectinload(ImportBatchModel.jobs),
+        )
     )
     result = await session.scalars(statement)
     return result.first()
+
+
+async def list_import_batches(
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID | None,
+    account_id: UUID | None,
+    import_status: ImportStatus | None,
+    limit: int,
+    offset: int,
+) -> list[ImportBatchModel]:
+    statement: Select[tuple[ImportBatchModel]] = select(ImportBatchModel).options(
+        selectinload(ImportBatchModel.files)
+    )
+    if portfolio_id is not None:
+        statement = statement.where(ImportBatchModel.portfolio_id == portfolio_id)
+    if account_id is not None:
+        statement = statement.where(ImportBatchModel.account_id == account_id)
+    if import_status is not None:
+        statement = statement.where(ImportBatchModel.status == import_status)
+    statement = statement.order_by(
+        ImportBatchModel.created_at.desc(), ImportBatchModel.id.desc()
+    ).limit(limit).offset(offset)
+    return list(await session.scalars(statement))
+
+
+async def get_portfolio_import_quality_summary(
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+) -> PortfolioImportQualitySummary:
+    batches = list(
+        await session.scalars(
+            select(ImportBatchModel).where(
+                ImportBatchModel.portfolio_id == portfolio_id,
+                ImportBatchModel.status.not_in(
+                    (ImportStatus.FAILED, ImportStatus.ROLLED_BACK)
+                ),
+            )
+        )
+    )
+    committed_statuses = {
+        ImportStatus.COMMITTED,
+        ImportStatus.RECALCULATING,
+        ImportStatus.COMPLETED,
+    }
+    committed = [item for item in batches if item.status in committed_statuses]
+    return PortfolioImportQualitySummary(
+        period_limited_batch_count=sum(
+            item.completeness
+            in {
+                ImportCompleteness.PERIOD_LEDGER,
+                ImportCompleteness.SNAPSHOT_WITH_MOVEMENTS,
+            }
+            for item in committed
+        ),
+        unknown_completeness_batch_count=sum(
+            item.completeness is ImportCompleteness.UNKNOWN for item in committed
+        ),
+        reconciliation_mismatch_batch_count=sum(
+            item.reconciliation_status is ImportReconciliationStatus.MISMATCH
+            for item in committed
+        ),
+        unresolved_review_row_count=sum(
+            item.warning_rows + item.error_rows + item.duplicate_rows
+            for item in batches
+            if item.status is ImportStatus.AWAITING_REVIEW
+        ),
+    )
 
 
 async def list_import_rows(
@@ -294,6 +511,7 @@ async def get_import_preview_summary(
         )
     )
     operation_counts: Counter[str] = Counter()
+    diagnostic_counts: Counter[str] = Counter()
     currency_totals: dict[str, _CurrencyAccumulator] = {}
     with localcontext() as context:
         context.prec = 80
@@ -306,6 +524,16 @@ async def get_import_preview_summary(
                 continue
             operation_counts[operation_type] += 1
             _add_candidate_to_summary(operation_type, payload, currency_totals)
+    diagnostics_result = await session.execute(
+        select(ImportRowModel.warnings, ImportRowModel.errors).where(
+            ImportRowModel.batch_id == batch_id
+        )
+    )
+    for warnings, errors in diagnostics_result.all():
+        for diagnostic in [*warnings, *errors]:
+            code = diagnostic.get("code") if isinstance(diagnostic, dict) else None
+            if isinstance(code, str):
+                diagnostic_counts[code] += 1
     return ImportPreviewSummary(
         operation_counts=dict(sorted(operation_counts.items())),
         currency_totals={
@@ -320,6 +548,7 @@ async def get_import_preview_summary(
             )
             for currency, totals in sorted(currency_totals.items())
         },
+        diagnostic_counts=dict(sorted(diagnostic_counts.items())),
     )
 
 

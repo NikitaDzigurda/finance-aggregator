@@ -104,3 +104,33 @@ def test_correction_operation_requires_an_audit_note() -> None:
         operation_adapter.validate_python(data)
 
     assert "correction_note_required" in {item["type"] for item in error.value.errors()}
+
+
+def test_crypto_trade_and_asset_fee_preserve_exact_two_asset_contract() -> None:
+    trade = operation_adapter.validate_python(
+        operation_payload(
+            "crypto_trade",
+            {
+                "sold_instrument_id": "33333333-4444-4555-8666-777777777777",
+                "sold_quantity": "100.000000000000000001",
+                "bought_instrument_id": "44444444-5555-4666-8777-888888888888",
+                "bought_quantity": "5.000000000000000001",
+            },
+        )
+    )
+    asset_fee = operation_adapter.validate_python(
+        operation_payload(
+            "fee",
+            {
+                "instrument_id": "55555555-6666-4777-8888-999999999999",
+                "quantity": "0.000000000000000001",
+            },
+        )
+    )
+    old_fee = operation_adapter.validate_python(
+        operation_payload("fee", {"amount": "1.25", "currency": "USD"})
+    )
+
+    assert str(trade.payload.sold_quantity) == "100.000000000000000001"
+    assert str(asset_fee.payload.quantity) == "1E-18"
+    assert str(old_fee.payload.amount) == "1.25"

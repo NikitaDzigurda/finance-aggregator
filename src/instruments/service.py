@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from uuid import UUID
 
 from sqlalchemy import select
@@ -49,6 +50,21 @@ async def list_instruments(
         .order_by(InstrumentModel.created_at, InstrumentModel.id)
         .limit(limit)
         .offset(offset)
+    )
+    return list(result)
+
+
+async def get_instruments_by_ids(
+    session: AsyncSession,
+    instrument_ids: Collection[UUID],
+) -> list[InstrumentModel]:
+    if not instrument_ids:
+        return []
+    result = await session.scalars(
+        select(InstrumentModel)
+        .options(selectinload(InstrumentModel.identifiers))
+        .where(InstrumentModel.id.in_(instrument_ids))
+        .order_by(InstrumentModel.id)
     )
     return list(result)
 

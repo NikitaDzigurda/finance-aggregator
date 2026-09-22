@@ -67,11 +67,7 @@ class UniversalBrokerCsvAdapter:
 
     def detect(self, document: ImportDocument) -> DetectionResult:
         table = _read_table(document)
-        completeness = (
-            ImportCompleteness.COMPLETE
-            if _REQUIRED_HEADERS.issubset(table.headers)
-            else ImportCompleteness.UNKNOWN
-        )
+        completeness = ImportCompleteness.UNKNOWN
         return DetectionResult(
             matched=True,
             completeness=completeness,

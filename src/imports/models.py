@@ -29,14 +29,21 @@ from shared.models import TimestampMixin
 class ImportFileFormat(StrEnum):
     CSV = "csv"
     XLSX = "xlsx"
+    XML = "xml"
     PDF = "pdf"
 
 
 class ImportCompleteness(StrEnum):
-    COMPLETE = "complete"
-    PARTIAL = "partial"
-    SNAPSHOT = "snapshot"
+    FULL_LEDGER = "full_ledger"
+    PERIOD_LEDGER = "period_ledger"
+    SNAPSHOT_WITH_MOVEMENTS = "snapshot_with_movements"
     UNKNOWN = "unknown"
+
+
+class ImportReconciliationStatus(StrEnum):
+    NOT_AVAILABLE = "not_available"
+    MATCHED = "matched"
+    MISMATCH = "mismatch"
 
 
 class ImportStatus(StrEnum):
@@ -81,6 +88,8 @@ class ImportJobType(StrEnum):
     CONFIRM_IMPORT = "confirm_import"
     RECALCULATE_PORTFOLIO = "recalculate_portfolio"
     ROLLBACK_IMPORT = "rollback_import"
+    FX_SYNC = "fx_sync"
+    MARKET_DATA_SYNC = "market_data_sync"
 
 
 class ImportJobStatus(StrEnum):
@@ -131,6 +140,10 @@ class ImportBatchModel(TimestampMixin, Base):
         CheckConstraint(
             "error_summary IS NULL OR jsonb_typeof(error_summary) = 'object'",
             name="import_batch_error_summary_object",
+        ),
+        CheckConstraint(
+            "reconciliation_summary IS NULL OR jsonb_typeof(reconciliation_summary) = 'object'",
+            name="import_batch_reconciliation_summary_object",
         ),
         ForeignKeyConstraint(
             ["account_id", "portfolio_id"],
@@ -216,17 +229,90 @@ class ImportBatchModel(TimestampMixin, Base):
         server_default="0",
     )
     error_summary: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    reconciliation_status: Mapped[ImportReconciliationStatus] = mapped_column(
+        Enum(
+            ImportReconciliationStatus,
+            name="import_reconciliation_status",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+        default=ImportReconciliationStatus.NOT_AVAILABLE,
+        server_default=ImportReconciliationStatus.NOT_AVAILABLE.value,
+    )
+    reconciliation_summary: Mapped[dict[str, object] | None] = mapped_column(JSONB)
 
     rows: Mapped[list[ImportRowModel]] = relationship(
         back_populates="batch",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    files: Mapped[list[ImportBatchFileModel]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ImportBatchFileModel.sequence_number",
+    )
     jobs: Mapped[list[ImportJobModel]] = relationship(
         back_populates="batch",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+
+class ImportBatchFileModel(TimestampMixin, Base):
+    __tablename__ = "import_batch_files"
+    __table_args__ = (
+        CheckConstraint("sequence_number > 0", name="import_batch_file_sequence_positive"),
+        CheckConstraint(
+            "btrim(original_filename) <> ''",
+            name="import_batch_file_original_filename_not_blank",
+        ),
+        CheckConstraint(
+            "btrim(storage_key) <> ''",
+            name="import_batch_file_storage_key_not_blank",
+        ),
+        CheckConstraint("file_size_bytes > 0", name="import_batch_file_size_positive"),
+        CheckConstraint(
+            "sha256 ~ '^[0-9a-f]{64}$'",
+            name="import_batch_file_sha256_format",
+        ),
+        CheckConstraint(
+            "detected_document_type IS NULL OR btrim(detected_document_type) <> ''",
+            name="import_batch_file_document_type_not_blank",
+        ),
+        UniqueConstraint(
+            "batch_id", "sequence_number", name="uq_import_batch_files_batch_sequence"
+        ),
+        Index("ix_import_batch_files_batch_id", "batch_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    batch_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("import_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    declared_format: Mapped[ImportFileFormat] = mapped_column(
+        Enum(
+            ImportFileFormat,
+            name="import_file_format",
+            native_enum=False,
+            create_constraint=False,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    detected_document_type: Mapped[str | None] = mapped_column(String(100))
+
+    batch: Mapped[ImportBatchModel] = relationship(back_populates="files")
+    rows: Mapped[list[ImportRowModel]] = relationship(back_populates="source_file")
 
 
 class ImportRowModel(TimestampMixin, Base):
@@ -252,6 +338,10 @@ class ImportRowModel(TimestampMixin, Base):
         CheckConstraint(
             "normalized_candidate IS NULL OR jsonb_typeof(normalized_candidate) = 'object'",
             name="import_row_candidate_object",
+        ),
+        CheckConstraint(
+            "reconciliation_data IS NULL OR jsonb_typeof(reconciliation_data) = 'object'",
+            name="import_row_reconciliation_data_object",
         ),
         CheckConstraint(
             "jsonb_typeof(warnings) = 'array'",
@@ -284,11 +374,16 @@ class ImportRowModel(TimestampMixin, Base):
         nullable=False,
     )
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_file_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("import_batch_files.id", ondelete="RESTRICT"),
+    )
     source_page: Mapped[int | None] = mapped_column(Integer)
     source_sheet: Mapped[str | None] = mapped_column(String(128))
     source_row_number: Mapped[int | None] = mapped_column(Integer)
     raw_data: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
-    normalized_candidate: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    normalized_candidate: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
+    reconciliation_data: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True))
     status: Mapped[ImportRowStatus] = mapped_column(
         Enum(
             ImportRowStatus,
@@ -320,6 +415,7 @@ class ImportRowModel(TimestampMixin, Base):
     )
 
     batch: Mapped[ImportBatchModel] = relationship(back_populates="rows")
+    source_file: Mapped[ImportBatchFileModel | None] = relationship(back_populates="rows")
     resolutions: Mapped[list[ImportResolutionModel]] = relationship(
         back_populates="row",
         cascade="all, delete-orphan",
@@ -394,6 +490,15 @@ class ImportJobModel(TimestampMixin, Base):
             "last_error IS NULL OR jsonb_typeof(last_error) = 'object'",
             name="import_job_last_error_object",
         ),
+        CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="import_job_payload_object",
+        ),
+        CheckConstraint(
+            "(job_type IN ('fx_sync', 'market_data_sync') AND batch_id IS NULL) "
+            "OR (job_type NOT IN ('fx_sync', 'market_data_sync') AND batch_id IS NOT NULL)",
+            name="import_job_scope",
+        ),
         UniqueConstraint("batch_id", "job_type", name="uq_import_jobs_batch_type"),
         Index(
             "ix_import_jobs_claim",
@@ -404,10 +509,10 @@ class ImportJobModel(TimestampMixin, Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
-    batch_id: Mapped[UUID] = mapped_column(
+    batch_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("import_batches.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     job_type: Mapped[ImportJobType] = mapped_column(
         Enum(
@@ -439,6 +544,12 @@ class ImportJobModel(TimestampMixin, Base):
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(String(200))
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     last_error: Mapped[dict[str, object] | None] = mapped_column(JSONB)
 
-    batch: Mapped[ImportBatchModel] = relationship(back_populates="jobs")
+    batch: Mapped[ImportBatchModel | None] = relationship(back_populates="jobs")

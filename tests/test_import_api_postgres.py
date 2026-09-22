@@ -88,6 +88,21 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             assert formats_response.json() == {
                 "items": [
                     {
+                        "format_id": "alfa_broker_xml_import",
+                        "version": "1.0",
+                        "supported_file_formats": ["xml"],
+                    },
+                        {
+                            "format_id": "bybit_spot_csv_bundle",
+                            "version": "1.0",
+                            "supported_file_formats": ["csv"],
+                        },
+                        {
+                            "format_id": "tbank_broker_xlsx",
+                        "version": "1.0",
+                        "supported_file_formats": ["xlsx"],
+                    },
+                    {
                         "format_id": "universal_broker",
                         "version": "1.0",
                         "supported_file_formats": ["csv"],
@@ -121,6 +136,29 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             assert upload["batch"]["original_filename"] == "private.csv"
             assert "storage_key" not in upload["batch"]
             assert upload["batch"]["status"] == "uploaded"
+
+            list_response = await client.get(
+                "/api/v1/imports",
+                params={
+                    "portfolio_id": str(portfolio_id),
+                    "account_id": account_id,
+                    "status": "uploaded",
+                    "limit": 1,
+                },
+            )
+            assert list_response.status_code == 200, list_response.text
+            assert list_response.json()["limit"] == 1
+            assert list_response.json()["offset"] == 0
+            assert [item["id"] for item in list_response.json()["items"]] == [
+                str(batch_id)
+            ]
+
+            empty_list_response = await client.get(
+                "/api/v1/imports",
+                params={"portfolio_id": str(portfolio_id), "status": "completed"},
+            )
+            assert empty_list_response.status_code == 200
+            assert empty_list_response.json()["items"] == []
 
             status_response = await client.get(f"/api/v1/imports/{batch_id}")
             assert status_response.status_code == 200
@@ -185,6 +223,9 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             processed_preview = await client.get(f"/api/v1/imports/{batch_id}/preview")
             assert processed_preview.status_code == 200
             assert processed_preview.json()["warning_rows"] == 1
+            assert processed_preview.json()["completeness"] == "unknown"
+            assert processed_preview.json()["reconciliation_status"] == "not_available"
+            assert processed_preview.json()["reconciliation_summary"] is None
             assert processed_preview.json()["items"][0]["raw_data"]["Date"] == "03.08.2026"
             assert processed_preview.json()["items"][0]["normalized_candidate"] == {
                 "operation_type": "trade",
@@ -208,6 +249,7 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             ]
             assert processed_preview.json()["summary"] == {
                 "operation_counts": {"fee": 1, "income": 1, "tax": 1, "trade": 1},
+                "diagnostic_counts": {"instrument_match_required": 1},
                 "currency_totals": {
                     "EUR": {
                         "trade_buys": 0,
@@ -260,6 +302,154 @@ async def test_import_upload_deduplication_preview_and_job_queue(tmp_path: Path)
             if instrument_id is not None:
                 await session.execute(
                     delete(InstrumentModel).where(InstrumentModel.id == instrument_id)
+                )
+        if storage_key is not None:
+            storage.delete(storage_key)
+        application.dependency_overrides.clear()
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_xml_upload_security_job_and_deduplication(tmp_path: Path) -> None:
+    database_url = os.getenv("FINANCE_TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("FINANCE_TEST_DATABASE_URL is not configured")
+
+    engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    storage = LocalObjectStorage(tmp_path / "xml-imports", max_file_size_bytes=32 * 1024)
+
+    async def override_session() -> AsyncIterator[AsyncSession]:
+        async with sessions() as session:
+            try:
+                yield session
+            except Exception:
+                await session.rollback()
+                raise
+
+    application = create_app()
+    application.dependency_overrides[get_db_session] = override_session
+    application.dependency_overrides[get_object_storage] = lambda: storage
+    transport = ASGITransport(app=application)
+    portfolio_id: UUID | None = None
+    batch_id: UUID | None = None
+    storage_key: str | None = None
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            portfolio_response = await client.post(
+                "/api/v1/portfolios",
+                json={"name": f"XML import {uuid4().hex[:8]}", "base_currency": "RUB"},
+            )
+            assert portfolio_response.status_code == 201
+            portfolio_id = UUID(portfolio_response.json()["id"])
+            account_response = await client.post(
+                f"/api/v1/portfolios/{portfolio_id}/accounts",
+                json={"name": "Synthetic Alfa broker", "account_type": "broker"},
+            )
+            assert account_response.status_code == 201
+            account_id = account_response.json()["id"]
+            form = {
+                "portfolio_id": str(portfolio_id),
+                "account_id": account_id,
+                "source_provider": "alfa_broker_xml_import",
+                "declared_format": "xml",
+            }
+            fixture = (
+                Path(__file__).parents[1]
+                / "docs"
+                / "fixtures"
+                / "alfa_broker_report_import_synthetic_v1.xml"
+            ).read_bytes()
+
+            upload_response = await client.post(
+                "/api/v1/imports",
+                data=form,
+                files={"file": ("synthetic-alfa.xml", fixture, "application/xml; charset=utf-8")},
+            )
+            assert upload_response.status_code == 201, upload_response.text
+            upload = upload_response.json()
+            batch_id = UUID(upload["batch"]["id"])
+            assert upload["batch"]["declared_format"] == "xml"
+            assert upload["batch"]["status"] == "uploaded"
+            assert upload["duplicate"] is False
+
+            status_response = await client.get(f"/api/v1/imports/{batch_id}")
+            assert status_response.status_code == 200
+            assert status_response.json()["jobs"][0]["status"] == "pending"
+
+            duplicate_response = await client.post(
+                "/api/v1/imports",
+                data=form,
+                files={"file": ("renamed.xml", fixture, "text/xml")},
+            )
+            assert duplicate_response.status_code == 200
+            assert duplicate_response.json()["duplicate"] is True
+            assert duplicate_response.json()["batch"]["id"] == str(batch_id)
+
+            invalid_content_type = await client.post(
+                "/api/v1/imports",
+                data=form,
+                files={"file": ("synthetic-alfa.xml", fixture, "text/html")},
+            )
+            assert invalid_content_type.status_code == 415
+            assert invalid_content_type.json()["error"]["code"] == (
+                "import_content_type_invalid"
+            )
+
+            invalid_extension = await client.post(
+                "/api/v1/imports",
+                data=form,
+                files={"file": ("synthetic-alfa.html", fixture, "application/xml")},
+            )
+            assert invalid_extension.status_code == 422
+            assert invalid_extension.json()["error"]["code"] == "import_extension_mismatch"
+
+            unsafe_payloads = [
+                (
+                    b"<html><body>PRIVATE-MARKER</body></html>",
+                    "import_file_signature_invalid",
+                ),
+                (
+                    b'<?xml version="1.0"?><!DOCTYPE report_broker '
+                    b'[<!ENTITY x "PRIVATE-MARKER">]><report_broker>&x;</report_broker>',
+                    "import_xml_dtd_forbidden",
+                ),
+                (
+                    b"<report_broker>"
+                    + b"<level>" * 64
+                    + b"PRIVATE-MARKER"
+                    + b"</level>" * 64
+                    + b"</report_broker>",
+                    "import_xml_depth_limit_exceeded",
+                ),
+            ]
+            for index, (payload, expected_code) in enumerate(unsafe_payloads):
+                rejected = await client.post(
+                    "/api/v1/imports",
+                    data=form,
+                    files={"file": (f"unsafe-{index}.xml", payload, "application/xml")},
+                )
+                assert rejected.status_code == 422
+                assert rejected.json()["error"]["code"] == expected_code
+                assert "PRIVATE-MARKER" not in rejected.text
+
+        async with sessions() as session:
+            stored_batch = await session.get(ImportBatchModel, batch_id)
+            assert stored_batch is not None
+            storage_key = stored_batch.storage_key
+            assert stored_batch.sha256 == upload["batch"]["sha256"]
+            assert storage.exists(storage_key)
+    finally:
+        async with sessions.begin() as session:
+            if batch_id is not None:
+                await session.execute(
+                    delete(ImportBatchModel).where(ImportBatchModel.id == batch_id)
+                )
+            if portfolio_id is not None:
+                await session.execute(
+                    delete(PortfolioModel).where(PortfolioModel.id == portfolio_id)
                 )
         if storage_key is not None:
             storage.delete(storage_key)

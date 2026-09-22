@@ -45,22 +45,17 @@ async def finish_job(
     worker_id: str,
     succeeded: bool,
     error: dict[str, object] | None = None,
+    result: dict[str, object] | None = None,
 ) -> None:
-    statement = (
-        select(ImportJobModel)
-        .where(ImportJobModel.id == job_id)
-        .with_for_update()
-    )
+    statement = select(ImportJobModel).where(ImportJobModel.id == job_id).with_for_update()
     job = await session.scalar(statement)
-    if (
-        job is None
-        or job.status != ImportJobStatus.RUNNING
-        or job.locked_by != worker_id
-    ):
+    if job is None or job.status != ImportJobStatus.RUNNING or job.locked_by != worker_id:
         await session.rollback()
         raise RuntimeError("Import job is not owned by this worker")
     job.status = ImportJobStatus.SUCCEEDED if succeeded else ImportJobStatus.FAILED
     job.locked_at = None
     job.locked_by = None
     job.last_error = error
+    if result is not None:
+        job.payload = {**job.payload, "result": result}
     await session.commit()

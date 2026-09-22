@@ -172,25 +172,18 @@ async def test_position_recalculation_api_is_exact_repeatable_and_diagnostic() -
             first_body = first.json()
             assert first_body["status"] == "completed_with_diagnostics"
             assert first_body["operation_count"] == 6
-            positions = {
-                item["instrument_id"]: item for item in first_body["positions"]
-            }
+            positions = {item["instrument_id"]: item for item in first_body["positions"]}
             main_position = positions[str(instrument_ids[0])]
             assert main_position["quantity"] == "15.000000000000000000"
             assert main_position["average_cost"] == "150.000000000000000000"
             assert main_position["realised_pnl"] == "150.000000000000000000"
             assert main_position["unrealised_pnl"] == "900.000000000000000000"
-            assert positions[str(instrument_ids[1])]["quantity"] == (
-                "-1.000000000000000000"
-            )
+            assert positions[str(instrument_ids[1])]["quantity"] == ("-1.000000000000000000")
             assert {(item["severity"], item["code"]) for item in first_body["diagnostics"]} == {
                 ("error", "negative_position"),
                 ("warning", "market_price_missing"),
             }
-            balances = {
-                item["currency"]: item["amount"]
-                for item in first_body["cash_balances"]
-            }
+            balances = {item["currency"]: item["amount"] for item in first_body["cash_balances"]}
             assert balances == {
                 "EUR": "-7.500000000000000000",
                 "USD": "97950.000000000000000000",
@@ -218,6 +211,14 @@ async def test_position_recalculation_api_is_exact_repeatable_and_diagnostic() -
             assert stored.json() == second_body
     finally:
         async with sessions.begin() as session:
+            from calculation.models import CalculationSnapshotModel
+
+            if portfolio_id is not None:
+                await session.execute(
+                    delete(CalculationSnapshotModel).where(
+                        CalculationSnapshotModel.portfolio_id == portfolio_id
+                    )
+                )
             if instrument_ids:
                 await session.execute(
                     delete(MarketPriceModel).where(
@@ -226,9 +227,7 @@ async def test_position_recalculation_api_is_exact_repeatable_and_diagnostic() -
                 )
             if portfolio_id is not None:
                 await session.execute(
-                    delete(OperationModel).where(
-                        OperationModel.portfolio_id == portfolio_id
-                    )
+                    delete(OperationModel).where(OperationModel.portfolio_id == portfolio_id)
                 )
                 await session.execute(
                     delete(PortfolioModel).where(PortfolioModel.id == portfolio_id)

@@ -41,6 +41,19 @@ async def list_accounts(
     return list(result)
 
 
+async def list_portfolio_accounts(
+    session: AsyncSession,
+    *,
+    portfolio_id: UUID,
+) -> list[AccountModel]:
+    result = await session.scalars(
+        select(AccountModel)
+        .where(AccountModel.portfolio_id == portfolio_id)
+        .order_by(AccountModel.created_at, AccountModel.id)
+    )
+    return list(result)
+
+
 def update_account(account: AccountModel, payload: AccountUpdate) -> None:
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     for field, value in values.items():

@@ -11,6 +11,7 @@ from uuid import UUID
 
 from calculation.contracts import (
     CALCULATION_CONTRACT_VERSION,
+    AssetFeeEvent,
     CalculationCashDirection,
     CalculationEvent,
     CalculationInput,
@@ -19,6 +20,7 @@ from calculation.contracts import (
     CalculationTradeSide,
     CashMovementEvent,
     CostBasisMethod,
+    CryptoTradeEvent,
     CurrencyExchangeEvent,
     FeeEvent,
     IncomeEvent,
@@ -34,7 +36,12 @@ def _uuid(namespace: int, sequence: int) -> UUID:
     return UUID(int=(namespace << 96) + sequence + 1)
 
 
-def _event(phase: int, instrument_id: UUID, price: Decimal) -> CalculationEvent:
+def _event(
+    phase: int,
+    instrument_id: UUID,
+    paired_instrument_id: UUID,
+    price: Decimal,
+) -> CalculationEvent:
     if phase == 0:
         return TradeEvent(
             side=CalculationTradeSide.BUY,
@@ -88,10 +95,21 @@ def _event(phase: int, instrument_id: UUID, price: Decimal) -> CalculationEvent:
             price=price + Decimal("3"),
             price_currency="USD",
         )
-    return CashMovementEvent(
-        direction=CalculationCashDirection.DEPOSIT,
-        amount=Decimal("100"),
-        currency="USD",
+    if phase == 9:
+        return CashMovementEvent(
+            direction=CalculationCashDirection.DEPOSIT,
+            amount=Decimal("100"),
+            currency="USD",
+        )
+    if phase == 10:
+        return AssetFeeEvent(instrument_id=instrument_id, quantity=Decimal("0.01"))
+    if paired_instrument_id == instrument_id:
+        return AssetFeeEvent(instrument_id=instrument_id, quantity=Decimal("0.01"))
+    return CryptoTradeEvent(
+        sold_instrument_id=instrument_id,
+        sold_quantity=Decimal("0.25"),
+        bought_instrument_id=paired_instrument_id,
+        bought_quantity=Decimal("0.10"),
     )
 
 
@@ -112,15 +130,16 @@ def build_input(
         pair_index = sequence % pair_count
         account_index = pair_index % account_count
         instrument_index = pair_index // account_count
-        phase = (sequence // pair_count) % 10
+        phase = (sequence // pair_count) % 12
         price = Decimal(50 + instrument_index % 100) + Decimal("0.25")
         instrument_id = instrument_ids[instrument_index]
+        paired_instrument_id = instrument_ids[(instrument_index + 1) % instrument_count]
         operations.append(
             CalculationOperation(
                 operation_id=_uuid(3, sequence),
                 account_id=account_ids[account_index],
                 occurred_at=_START + timedelta(seconds=sequence),
-                event=_event(phase, instrument_id, price),
+                event=_event(phase, instrument_id, paired_instrument_id, price),
             )
         )
 

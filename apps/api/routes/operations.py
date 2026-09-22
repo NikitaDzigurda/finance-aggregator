@@ -20,7 +20,7 @@ from operations.service import (
     create_manual_operation,
     get_operation,
     list_operations,
-    payload_instrument_id,
+    payload_instrument_ids,
 )
 from shared.database import get_db_session
 from shared.errors import ApiErrorException, ErrorResponse
@@ -91,9 +91,9 @@ async def create_operation_route(
     if account is None or account.portfolio_id != payload.portfolio_id:
         not_found("account")
 
-    instrument_id = payload_instrument_id(payload)
-    if instrument_id is not None and await get_instrument(session, instrument_id) is None:
-        not_found("instrument")
+    for instrument_id in payload_instrument_ids(payload):
+        if await get_instrument(session, instrument_id) is None:
+            not_found("instrument")
 
     if payload.correction_of_operation_id is not None:
         corrected = await get_operation(session, payload.correction_of_operation_id)

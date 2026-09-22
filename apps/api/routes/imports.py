@@ -8,8 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.routes.common import not_found
 from imports.adapters import AdapterRegistry, get_adapter_registry
-from imports.models import ImportFileFormat
+from imports.models import ImportFileFormat, ImportStatus
 from imports.schemas import (
+    ImportBatchListResponse,
     ImportBatchResponse,
     ImportConfirmResponse,
     ImportFormatListResponse,
@@ -25,9 +26,11 @@ from imports.schemas import (
     SourceProvider,
 )
 from imports.service import (
-    create_import_batch,
+    ImportUploadPart,
+    create_import_batch_documents,
     get_import_batch,
     get_import_preview_summary,
+    list_import_batches,
     list_import_formats,
     list_import_rows,
 )
@@ -97,8 +100,12 @@ RESOLUTION_EXAMPLES = {
     responses=UPLOAD_RESPONSES,
     summary="Upload an import file into traceable staging",
     description=(
-        "Streams a CSV, XLSX, or PDF into protected storage and queues parsing. A repeated SHA-256 "
-        "for the same account returns the existing batch with HTTP 200 and duplicate=true."
+        "Streams one or more CSV files, or one XLSX, XML, or PDF, into protected storage and "
+        "queues parsing. XML is "
+        "validated with DTD/entity prohibitions and bounded depth, element count, and value "
+        "length. "
+        "A repeated SHA-256 for the same account returns the existing batch with HTTP 200 and "
+        "duplicate=true."
     ),
 )
 async def upload_import_route(
@@ -119,38 +126,95 @@ async def upload_import_route(
     ],
     source_provider: Annotated[
         SourceProvider,
-        Form(description="Registered source provider ID", examples=["universal_broker"]),
+        Form(
+            description=(
+                "Explicit registered adapter ID. Use tbank_broker_xlsx for the official "
+                "T-Investments XLSX, alfa_broker_xml_import for the Alfa-Investments import "
+                "XML, bybit_spot_csv_bundle for the four-file Bybit Spot CSV export, or "
+                "universal_broker for the synthetic CSV contract. The adapter also "
+                "validates the file's internal format."
+            ),
+            examples=[
+                "tbank_broker_xlsx",
+                "alfa_broker_xml_import",
+                "bybit_spot_csv_bundle",
+                "universal_broker",
+            ],
+        ),
     ],
     declared_format: Annotated[
         ImportFileFormat,
-        Form(description="Uploaded file format", examples=["csv"]),
+        Form(description="Uploaded file format matching the adapter", examples=["xlsx", "xml"]),
     ],
     file: Annotated[
-        UploadFile,
-        File(description="CSV, XLSX, or PDF report stored outside the project tree"),
+        list[UploadFile],
+        File(
+            description=(
+                "One report file, or all four Bybit Spot CSV exports as repeated `file` parts. "
+                "Originals are stored outside the project tree."
+            )
+        ),
     ],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     storage: Annotated[ObjectStorage, Depends(get_object_storage)],
 ) -> ImportUploadResponse:
     try:
-        batch, duplicate = await create_import_batch(
+        batch, duplicate = await create_import_batch_documents(
             session,
             storage,
             portfolio_id=portfolio_id,
             account_id=account_id,
             source_provider=source_provider,
             declared_format=declared_format,
-            filename=file.filename,
-            content_type=file.content_type,
-            source=file.file,
+            uploads=tuple(
+                ImportUploadPart(
+                    filename=item.filename,
+                    content_type=item.content_type,
+                    source=item.file,
+                )
+                for item in file
+            ),
         )
     finally:
-        await file.close()
+        for item in file:
+            await item.close()
     if duplicate:
         response.status_code = status.HTTP_200_OK
     return ImportUploadResponse(
         batch=ImportBatchResponse.model_validate(batch),
         duplicate=duplicate,
+    )
+
+
+@router.get(
+    "",
+    response_model=ImportBatchListResponse,
+    summary="List import batches",
+    description=(
+        "Returns newest import batches first for import history and recovery workflows. "
+        "Optional portfolio, account, and status filters may be combined."
+    ),
+)
+async def list_import_batches_route(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    portfolio_id: Annotated[UUID | None, Query()] = None,
+    account_id: Annotated[UUID | None, Query()] = None,
+    import_status: Annotated[ImportStatus | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ImportBatchListResponse:
+    batches = await list_import_batches(
+        session,
+        portfolio_id=portfolio_id,
+        account_id=account_id,
+        import_status=import_status,
+        limit=limit,
+        offset=offset,
+    )
+    return ImportBatchListResponse(
+        items=[ImportBatchResponse.model_validate(batch) for batch in batches],
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -258,6 +322,14 @@ async def get_import_preview_route(
     summary = await get_import_preview_summary(session, batch_id)
     return ImportPreviewResponse(
         batch_id=batch.id,
+        source_provider=batch.source_provider,
+        detected_format=batch.detected_format,
+        detected_version=batch.detected_version,
+        reporting_period_start=batch.reporting_period_start,
+        reporting_period_end=batch.reporting_period_end,
+        completeness=batch.completeness,
+        reconciliation_status=batch.reconciliation_status,
+        reconciliation_summary=batch.reconciliation_summary,
         status=batch.status,
         total_rows=batch.total_rows,
         ready_rows=batch.ready_rows,
@@ -310,7 +382,11 @@ async def rollback_import_route(
     "",
     response_model=ImportFormatListResponse,
     summary="List registered versioned import adapters",
-    description="Lists adapter IDs, versions, and file formats accepted by the current process.",
+    description=(
+        "Lists adapter IDs, versions, and file formats accepted by the current process, including "
+        "tbank_broker_xlsx 1.0, alfa_broker_xml_import 1.0, and "
+        "bybit_spot_csv_bundle 1.0."
+    ),
 )
 async def list_import_formats_route(
     registry: Annotated[AdapterRegistry, Depends(get_adapter_registry)],

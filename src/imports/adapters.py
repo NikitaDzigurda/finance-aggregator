@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from functools import cache
 from typing import BinaryIO, Protocol
 
@@ -18,6 +19,14 @@ class ImportDocument:
     size_bytes: int
     sha256: str
     stream: BinaryIO
+    document_index: int = 0
+    bundle_documents: tuple[ImportDocument, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DetectedDocument:
+    document_index: int
+    document_type: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +34,9 @@ class DetectionResult:
     matched: bool
     completeness: ImportCompleteness = ImportCompleteness.UNKNOWN
     diagnostics: tuple[dict[str, object], ...] = ()
+    reporting_period_start: date | None = None
+    reporting_period_end: date | None = None
+    documents: tuple[DetectedDocument, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +44,13 @@ class ParsedRow:
     sequence_number: int
     raw_data: dict[str, object]
     normalized_candidate: dict[str, object] | None = None
+    reconciliation_data: dict[str, object] | None = None
     status: ImportRowStatus | None = None
     fingerprint: str | None = None
     source_page: int | None = None
     source_sheet: str | None = None
     source_row_number: int | None = None
+    source_document_index: int = 0
     warnings: tuple[dict[str, object], ...] = ()
     errors: tuple[dict[str, object], ...] = ()
 
@@ -111,8 +125,14 @@ class AdapterRegistry:
 
 @cache
 def get_adapter_registry() -> AdapterRegistry:
+    from imports.alfa_broker_xml import AlfaBrokerXmlAdapter
+    from imports.bybit_spot_csv import BybitSpotCsvBundleAdapter
+    from imports.tbank_broker_xlsx import TbankBrokerXlsxAdapter
     from imports.universal_broker_csv import UniversalBrokerCsvAdapter
 
     registry = AdapterRegistry()
+    registry.register(AlfaBrokerXmlAdapter())
+    registry.register(BybitSpotCsvBundleAdapter())
+    registry.register(TbankBrokerXlsxAdapter())
     registry.register(UniversalBrokerCsvAdapter())
     return registry

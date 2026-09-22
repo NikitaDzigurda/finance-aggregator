@@ -6,6 +6,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
     "alembic>=1.16.4",
     "fastapi>=0.116.1",
+    "openpyxl>=3.1.5,<4",
     "psycopg[binary]>=3.2.9",
     "pydantic-settings>=2.10.1",
     "python-multipart>=0.0.20",
@@ -30,6 +31,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
     "accounts",
+    "analytics",
     "allocation",
     "calculation",
     "identity",
@@ -62,6 +64,7 @@ files = ["apps", "src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "postgres: integration tests that require FINANCE_TEST_DATABASE_URL",
 ]

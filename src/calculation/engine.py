@@ -7,27 +7,34 @@ from uuid import UUID
 
 from calculation.contracts import (
     AssetAdjustmentEvent,
+    AssetFeeEvent,
     AssetTransferEvent,
     BondRedemptionEvent,
     CalculatedCashBalance,
     CalculatedCurrencyMetrics,
     CalculatedPosition,
+    CalculationBasisEffect,
     CalculationCashDirection,
     CalculationCorporateActionType,
     CalculationDiagnostic,
     CalculationInput,
     CalculationOperation,
+    CalculationOperationEffect,
+    CalculationOperationEffectsOutput,
     CalculationOutput,
     CalculationPrice,
+    CalculationRealisedPnlEffect,
     CalculationTradeSide,
     CalculationTransferDirection,
     CashAdjustmentEvent,
     CashMovementEvent,
     CorporateActionEvent,
     CostBasisMethod,
+    CryptoTradeEvent,
     CurrencyExchangeEvent,
     FeeEvent,
     IncomeEvent,
+    RealisedPnlEffectStatus,
     TaxEvent,
     TradeEvent,
 )
@@ -70,7 +77,12 @@ def calculate_positions(request: CalculationInput) -> CalculationOutput:
     with localcontext(_CALCULATION_CONTEXT):
         for operation in sorted(
             request.operations,
-            key=lambda item: (item.occurred_at, item.operation_id),
+            key=lambda item: (
+                item.occurred_at,
+                item.execution_operation_id or item.operation_id,
+                item.execution_operation_id is not None,
+                item.operation_id,
+            ),
         ):
             _apply_operation(operation, positions, cash, metrics, diagnostics)
 
@@ -117,6 +129,139 @@ def calculate_positions(request: CalculationInput) -> CalculationOutput:
     )
 
 
+def calculate_operation_effects(
+    request: CalculationInput,
+) -> CalculationOperationEffectsOutput:
+    """Replay Ledger deterministically and expose traceable per-operation effects."""
+    if request.cost_basis_method is not CostBasisMethod.WEIGHTED_AVERAGE:
+        raise ValueError("Unsupported cost basis method")
+
+    positions: dict[tuple[UUID, UUID], _PositionState] = {}
+    cash: defaultdict[tuple[UUID, str], Decimal] = defaultdict(Decimal)
+    metrics: defaultdict[tuple[UUID, str], _MetricsState] = defaultdict(_MetricsState)
+    diagnostics: list[CalculationDiagnostic] = []
+    effects: list[CalculationOperationEffect] = []
+
+    with localcontext(_CALCULATION_CONTEXT):
+        for operation in sorted(
+            request.operations,
+            key=lambda item: (
+                item.occurred_at,
+                item.execution_operation_id or item.operation_id,
+                item.execution_operation_id is not None,
+                item.operation_id,
+            ),
+        ):
+            before_positions = {
+                key: (state.quantity, state.cost_currency, state.cost_basis)
+                for key, state in positions.items()
+            }
+            before_realised = {
+                key: state.realised_pnl for key, state in metrics.items()
+            }
+            diagnostic_offset = len(diagnostics)
+            _apply_operation(operation, positions, cash, metrics, diagnostics)
+
+            basis_changes: list[CalculationBasisEffect] = []
+            for position_key in sorted(
+                set(before_positions) | set(positions),
+                key=_position_key,
+            ):
+                before_position = before_positions.get(
+                    position_key,
+                    (_ZERO, None, _ZERO),
+                )
+                after_state = positions.get(position_key)
+                after_position = (
+                    (after_state.quantity, after_state.cost_currency, after_state.cost_basis)
+                    if after_state is not None
+                    else (_ZERO, None, _ZERO)
+                )
+                if before_position == after_position:
+                    continue
+                basis_changes.append(
+                    CalculationBasisEffect(
+                        account_id=position_key[0],
+                        instrument_id=position_key[1],
+                        quantity_before=before_position[0],
+                        quantity_after=after_position[0],
+                        cost_currency_before=before_position[1],
+                        cost_currency_after=after_position[1],
+                        cost_basis_before=before_position[2],
+                        cost_basis_after=after_position[2],
+                    )
+                )
+
+            realised_pnl: list[CalculationRealisedPnlEffect] = []
+            realised_key = _realised_pnl_key(operation)
+            for metric_key in sorted(
+                set(before_realised) | set(metrics),
+                key=_metric_key,
+            ):
+                before_realised_value = before_realised.get(metric_key, _ZERO)
+                after_realised_value = metrics[metric_key].realised_pnl
+                if (
+                    before_realised_value == after_realised_value
+                    and metric_key != realised_key
+                ):
+                    continue
+                realised_pnl.append(
+                    CalculationRealisedPnlEffect(
+                        account_id=metric_key[0],
+                        currency=metric_key[1],
+                        amount=_money(after_realised_value - before_realised_value),
+                    )
+                )
+            effects.append(
+                CalculationOperationEffect(
+                    operation_id=operation.operation_id,
+                    account_id=operation.account_id,
+                    occurred_at=operation.occurred_at,
+                    realised_pnl_status=_realised_pnl_status(operation, realised_pnl),
+                    realised_pnl=tuple(realised_pnl),
+                    basis_changes=tuple(basis_changes),
+                    diagnostics=tuple(diagnostics[diagnostic_offset:]),
+                )
+            )
+
+    return CalculationOperationEffectsOutput(
+        effects=tuple(effects),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _position_key(value: tuple[UUID, UUID]) -> tuple[str, str]:
+    return str(value[0]), str(value[1])
+
+
+def _metric_key(value: tuple[UUID, str]) -> tuple[str, str]:
+    return str(value[0]), value[1]
+
+
+def _realised_pnl_applies(operation: CalculationOperation) -> bool:
+    return _realised_pnl_key(operation) is not None
+
+
+def _realised_pnl_key(operation: CalculationOperation) -> tuple[UUID, str] | None:
+    event = operation.event
+    if isinstance(event, TradeEvent) and event.side is CalculationTradeSide.SELL:
+        return operation.account_id, event.price_currency
+    if isinstance(event, BondRedemptionEvent):
+        return operation.account_id, event.currency
+    return None
+
+
+def _realised_pnl_status(
+    operation: CalculationOperation,
+    effects: list[CalculationRealisedPnlEffect],
+) -> RealisedPnlEffectStatus:
+    if not _realised_pnl_applies(operation):
+        return RealisedPnlEffectStatus.NOT_APPLICABLE
+    if effects:
+        return RealisedPnlEffectStatus.AVAILABLE
+    return RealisedPnlEffectStatus.UNAVAILABLE
+
+
 def _apply_operation(
     operation: CalculationOperation,
     positions: dict[tuple[UUID, UUID], _PositionState],
@@ -152,6 +297,42 @@ def _apply_operation(
             if realised is not None:
                 metrics[(operation.account_id, event.price_currency)].realised_pnl += realised
         return
+    if isinstance(event, CryptoTradeEvent):
+        sold_state = _position(positions, operation.account_id, event.sold_instrument_id)
+        bought_state = _position(
+            positions, operation.account_id, event.bought_instrument_id
+        )
+        cost_currency = sold_state.cost_currency
+        transferred_basis = _dispose(
+            sold_state,
+            event.sold_quantity,
+            _ZERO,
+            cost_currency,
+            operation,
+            diagnostics,
+            realise=False,
+        )
+        if transferred_basis is not None and cost_currency is not None:
+            _acquire(
+                bought_state,
+                event.bought_quantity,
+                transferred_basis,
+                cost_currency,
+                operation,
+                diagnostics,
+            )
+        else:
+            bought_state.quantity = _quantity(
+                bought_state.quantity + event.bought_quantity
+            )
+            _invalidate_basis(
+                bought_state,
+                operation,
+                diagnostics,
+                "cost_basis_unknown",
+                "Crypto trade source asset does not have a known acquisition cost",
+            )
+        return
     if isinstance(event, IncomeEvent):
         cash[(operation.account_id, event.currency)] += event.amount
         metrics[(operation.account_id, event.currency)].income += event.amount
@@ -159,6 +340,18 @@ def _apply_operation(
     if isinstance(event, FeeEvent):
         cash[(operation.account_id, event.currency)] -= event.amount
         metrics[(operation.account_id, event.currency)].fees += event.amount
+        return
+    if isinstance(event, AssetFeeEvent):
+        state = _position(positions, operation.account_id, event.instrument_id)
+        _dispose(
+            state,
+            event.quantity,
+            _ZERO,
+            state.cost_currency,
+            operation,
+            diagnostics,
+            realise=False,
+        )
         return
     if isinstance(event, TaxEvent):
         cash[(operation.account_id, event.currency)] -= event.amount
@@ -351,7 +544,7 @@ def _dispose(
     if state.quantity == 0:
         state.cost_basis = _ZERO
     if not realise:
-        return _ZERO
+        return allocated_basis
     realised = _money(proceeds - allocated_basis)
     if state.realised_pnl is not None:
         state.realised_pnl = _money(state.realised_pnl + realised)

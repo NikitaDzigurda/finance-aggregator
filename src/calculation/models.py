@@ -148,6 +148,10 @@ class CalculatedPositionModel(Base):
     cost_basis: Mapped[Decimal | None] = mapped_column(MoneyNumeric())
     valuation_currency: Mapped[str | None] = mapped_column(String(3))
     market_price: Mapped[Decimal | None] = mapped_column(PriceNumeric())
+    market_price_observation_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("market_prices.id", ondelete="RESTRICT"),
+    )
     market_value: Mapped[Decimal | None] = mapped_column(MoneyNumeric())
     realised_pnl: Mapped[Decimal | None] = mapped_column(MoneyNumeric())
     unrealised_pnl: Mapped[Decimal | None] = mapped_column(MoneyNumeric())
@@ -238,6 +242,4 @@ class CalculatedCurrencyMetricsModel(Base):
     income: Mapped[Decimal] = mapped_column(MoneyNumeric(), nullable=False)
     realised_pnl: Mapped[Decimal] = mapped_column(MoneyNumeric(), nullable=False)
 
-    snapshot: Mapped[CalculationSnapshotModel] = relationship(
-        back_populates="currency_metrics"
-    )
+    snapshot: Mapped[CalculationSnapshotModel] = relationship(back_populates="currency_metrics")

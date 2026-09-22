@@ -6,11 +6,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from apps.api.routes.accounts import router as accounts_router
+from apps.api.routes.allocation import router as allocation_router
+from apps.api.routes.analytics import OVERVIEW_EXAMPLES
+from apps.api.routes.analytics import router as analytics_router
 from apps.api.routes.calculation import router as calculation_router
+from apps.api.routes.fx import router as fx_router
 from apps.api.routes.health import router as health_router
 from apps.api.routes.imports import formats_router as import_formats_router
 from apps.api.routes.imports import router as imports_router
 from apps.api.routes.instruments import router as instruments_router
+from apps.api.routes.market_data import router as market_data_router
 from apps.api.routes.operations import router as operations_router
 from apps.api.routes.portfolios import router as portfolios_router
 from apps.api.routes.pricing import router as pricing_router
@@ -44,7 +49,17 @@ OPENAPI_TAGS = [
     },
     {
         "name": "pricing",
-        "description": "Exact manual market-price observations used for valuation.",
+        "description": (
+            "Exact append-only manual market prices and public/manual fiat FX observations."
+        ),
+    },
+    {
+        "name": "allocation",
+        "description": "Portfolio asset categories, overrides, and actual allocation weights.",
+    },
+    {
+        "name": "analytics",
+        "description": "Current overview, holdings, breakdowns, and counterparty exposure.",
     },
     {
         "name": "calculation",
@@ -89,9 +104,23 @@ def create_app() -> FastAPI:
     application.include_router(instruments_router)
     application.include_router(operations_router)
     application.include_router(pricing_router)
+    application.include_router(market_data_router)
+    application.include_router(fx_router)
+    application.include_router(allocation_router)
+    application.include_router(analytics_router)
     application.include_router(calculation_router)
     application.include_router(imports_router)
     application.include_router(import_formats_router)
+    # FastAPI removes ``None`` values while assembling route metadata. Inject the
+    # final examples after schema generation so the partial example visibly keeps
+    # the required JSON ``null`` for an unavailable metric.
+    openapi_schema = application.openapi()
+    openapi_schema["paths"][
+        "/api/v1/portfolios/{portfolio_id}/analytics/overview"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["examples"] = (
+        OVERVIEW_EXAMPLES
+    )
+    application.openapi_schema = openapi_schema
     return application
 
 

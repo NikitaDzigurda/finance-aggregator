@@ -26,6 +26,7 @@ from shared.models import TimestampMixin
 
 class OperationType(StrEnum):
     TRADE = "trade"
+    CRYPTO_TRADE = "crypto_trade"
     INCOME = "income"
     FEE = "fee"
     TAX = "tax"
@@ -41,6 +42,7 @@ class OperationSourceType(StrEnum):
     MANUAL = "manual"
     CSV_IMPORT = "csv_import"
     XLSX_IMPORT = "xlsx_import"
+    XML_IMPORT = "xml_import"
     PDF_IMPORT = "pdf_import"
 
 
@@ -97,6 +99,11 @@ class OperationModel(TimestampMixin, Base):
         Index("ix_operations_account_occurred_at", "account_id", "occurred_at"),
         Index("ix_operations_type_occurred_at", "operation_type", "occurred_at"),
         Index("ix_operations_instrument_occurred_at", "instrument_id", "occurred_at"),
+        Index(
+            "ix_operations_secondary_instrument_occurred_at",
+            "secondary_instrument_id",
+            "occurred_at",
+        ),
         Index("ix_operations_account_fingerprint", "account_id", "fingerprint"),
         Index(
             "uq_operations_account_deduplication_key",
@@ -151,6 +158,10 @@ class OperationModel(TimestampMixin, Base):
     deduplication_key: Mapped[str | None] = mapped_column(String(64))
     payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     instrument_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("instruments.id", ondelete="RESTRICT"),
+    )
+    secondary_instrument_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("instruments.id", ondelete="RESTRICT"),
     )

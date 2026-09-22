@@ -53,6 +53,11 @@ def test_local_storage_hashes_limits_and_confines_paths(tmp_path: Path) -> None:
     with pytest.raises(InvalidStorageKeyError):
         storage.open("../outside.csv")
 
+    xml_stored = storage.save(BytesIO(b"<report_broker />"), suffix=".xml")
+    assert xml_stored.key.endswith(".xml")
+    with storage.open(xml_stored.key) as source:
+        assert source.read() == b"<report_broker />"
+
 
 def test_adapter_registry_keeps_versions_explicit() -> None:
     registry = AdapterRegistry()

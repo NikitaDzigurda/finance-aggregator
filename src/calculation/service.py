@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import DecimalException
 from uuid import UUID
@@ -12,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from calculation.contracts import (
     AssetAdjustmentEvent,
+    AssetFeeEvent,
     AssetTransferEvent,
     BondRedemptionEvent,
     CalculationCashDirection,
@@ -20,6 +22,7 @@ from calculation.contracts import (
     CalculationEvent,
     CalculationInput,
     CalculationOperation,
+    CalculationOperationEffectsOutput,
     CalculationPrice,
     CalculationTradeSide,
     CalculationTransferDirection,
@@ -27,13 +30,14 @@ from calculation.contracts import (
     CashMovementEvent,
     CorporateActionEvent,
     CostBasisMethod,
+    CryptoTradeEvent,
     CurrencyExchangeEvent,
     FeeEvent,
     IncomeEvent,
     TaxEvent,
     TradeEvent,
 )
-from calculation.engine import calculate_positions
+from calculation.engine import calculate_operation_effects, calculate_positions
 from calculation.models import (
     CalculatedCashBalanceModel,
     CalculatedCurrencyMetricsModel,
@@ -50,11 +54,13 @@ from calculation.schemas import (
 )
 from operations.models import OperationModel
 from operations.schemas import (
+    AssetFeePayload,
     BalanceAdjustmentPayload,
     BondRedemptionPayload,
     CashMovementPayload,
     CorporateActionPayload,
     CorporateActionType,
+    CryptoTradePayload,
     CryptoTransferPayload,
     CurrencyExchangePayload,
     FeePayload,
@@ -65,7 +71,7 @@ from operations.schemas import (
     operation_response,
 )
 from portfolios.models import PortfolioModel
-from pricing.models import MarketPriceModel
+from pricing.service import applicable_market_price, latest_market_prices_for_instruments
 from shared.errors import ApiErrorException
 from shared.exact import ExactDecimalError
 
@@ -78,9 +84,7 @@ async def recalculate_portfolio(
     cost_basis_method: CostBasisMethod,
 ) -> CalculationSnapshotModel:
     portfolio = await session.scalar(
-        select(PortfolioModel)
-        .where(PortfolioModel.id == portfolio_id)
-        .with_for_update()
+        select(PortfolioModel).where(PortfolioModel.id == portfolio_id).with_for_update()
     )
     if portfolio is None:
         _not_found()
@@ -95,16 +99,18 @@ async def recalculate_portfolio(
             .order_by(OperationModel.occurred_at, OperationModel.id)
         )
     )
-    price_records = list(
-        await session.scalars(
-            select(MarketPriceModel)
-            .where(MarketPriceModel.observed_at <= calculation_time)
-            .order_by(MarketPriceModel.observed_at, MarketPriceModel.id)
-        )
+    instrument_ids = {
+        UUID(value)
+        for operation in operation_records
+        for key in ("instrument_id", "sold_instrument_id", "bought_instrument_id")
+        if isinstance((value := operation.payload.get(key)), str)
+    }
+    price_records = await latest_market_prices_for_instruments(
+        session, instrument_ids=instrument_ids, valuation_as_of=calculation_time
     )
     request = CalculationInput(
         cost_basis_method=cost_basis_method,
-        operations=tuple(_calculation_operation(item) for item in operation_records),
+        operations=calculation_operations(operation_records),
         prices=tuple(
             CalculationPrice(
                 instrument_id=item.instrument_id,
@@ -175,6 +181,20 @@ async def recalculate_portfolio(
                 cost_basis=item.cost_basis,
                 valuation_currency=item.valuation_currency,
                 market_price=item.market_price,
+                market_price_observation_id=(
+                    selected.id
+                    if (
+                        selected := applicable_market_price(
+                            price_records,
+                            instrument_id=item.instrument_id,
+                            cost_currency=item.cost_currency,
+                        )
+                    )
+                    is not None
+                    and selected.currency == item.valuation_currency
+                    and selected.price == item.market_price
+                    else None
+                ),
                 market_value=item.market_value,
                 realised_pnl=item.realised_pnl,
                 unrealised_pnl=item.unrealised_pnl,
@@ -217,6 +237,11 @@ async def recalculate_portfolio(
             code="calculation_conflict",
             message="Portfolio calculation conflicts with current ledger data",
         ) from exc
+    # Bulk replacement does not invalidate already loaded ORM collections.
+    # Return the same fresh positions that a subsequent GET will read.
+    await session.refresh(
+        snapshot, attribute_names=["positions", "cash_balances", "currency_metrics"]
+    )
     stored = await get_position_snapshot(session, portfolio_id)
     if stored is None:
         raise RuntimeError("Stored calculation snapshot was not found")
@@ -250,8 +275,7 @@ def position_snapshot_response(
         as_of=snapshot.as_of,
         operation_count=snapshot.operation_count,
         diagnostics=[
-            CalculationDiagnosticResponse.model_validate(item)
-            for item in snapshot.diagnostics
+            CalculationDiagnosticResponse.model_validate(item) for item in snapshot.diagnostics
         ],
         positions=[
             CalculatedPositionResponse.model_validate(item)
@@ -279,13 +303,59 @@ def position_snapshot_response(
     )
 
 
-def _calculation_operation(record: OperationModel) -> CalculationOperation:
+def calculation_operation(record: OperationModel) -> CalculationOperation:
     response = operation_response(record)
     return CalculationOperation(
         operation_id=response.id,
         account_id=response.account_id,
         occurred_at=response.occurred_at,
         event=_calculation_event(response.payload),
+    )
+
+
+def calculation_operations(records: Sequence[OperationModel]) -> tuple[CalculationOperation, ...]:
+    from dataclasses import replace
+
+    # Bybit gives execution and asset commission the same timestamp and transaction ID.
+    # Do not guess links for manual events, unrelated transactions or other timestamps.
+    executions = {
+        (record.account_id, record.import_batch_id, record.source_operation_id): record
+        for record in records
+        if record.operation_type.value == "crypto_trade" and record.import_batch_id is not None
+    }
+    result = []
+    for record in records:
+        operation = calculation_operation(record)
+        source_id = record.source_operation_id or ""
+        if (
+            isinstance(operation.event, AssetFeeEvent)
+            and ":fee:" in source_id
+            and record.import_batch_id is not None
+        ):
+            execution = executions.get(
+                (
+                    record.account_id,
+                    record.import_batch_id,
+                    source_id.rsplit(":fee:", 1)[0] + ":trade",
+                )
+            )
+            if execution is not None and execution.occurred_at == record.occurred_at:
+                operation = replace(operation, execution_operation_id=execution.id)
+        result.append(operation)
+    return tuple(result)
+
+
+def derive_operation_effects(
+    records: Sequence[OperationModel],
+    *,
+    cost_basis_method: CostBasisMethod = CostBasisMethod.WEIGHTED_AVERAGE,
+) -> CalculationOperationEffectsOutput:
+    return calculate_operation_effects(
+        CalculationInput(
+            cost_basis_method=cost_basis_method,
+            operations=calculation_operations(records),
+            prices=(),
+        )
     )
 
 
@@ -298,10 +368,22 @@ def _calculation_event(payload: OperationPayload) -> CalculationEvent:
             price=payload.price,
             price_currency=payload.price_currency,
         )
+    if isinstance(payload, CryptoTradePayload):
+        return CryptoTradeEvent(
+            sold_instrument_id=payload.sold_instrument_id,
+            sold_quantity=payload.sold_quantity,
+            bought_instrument_id=payload.bought_instrument_id,
+            bought_quantity=payload.bought_quantity,
+        )
     if isinstance(payload, IncomePayload):
         return IncomeEvent(amount=payload.amount, currency=payload.currency)
     if isinstance(payload, FeePayload):
         return FeeEvent(amount=payload.amount, currency=payload.currency)
+    if isinstance(payload, AssetFeePayload):
+        return AssetFeeEvent(
+            instrument_id=payload.instrument_id,
+            quantity=payload.quantity,
+        )
     if isinstance(payload, TaxPayload):
         return TaxEvent(amount=payload.amount, currency=payload.currency)
     if isinstance(payload, CashMovementPayload):

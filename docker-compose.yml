@@ -3,6 +3,7 @@ name: finance-aggregator
 services:
   db:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: finance
       POSTGRES_USER: finance
@@ -19,6 +20,7 @@ services:
       start_period: 5s
 
   api:
+    restart: unless-stopped
     build:
       context: .
     environment:
@@ -50,6 +52,7 @@ services:
   worker:
     build:
       context: .
+    restart: unless-stopped
     entrypoint: ["python", "-m", "apps.worker.main"]
     environment:
       FINANCE_ENVIRONMENT: development
@@ -58,11 +61,39 @@ services:
       FINANCE_IMPORT_STORAGE_ROOT: /var/lib/finance-aggregator/imports
       FINANCE_IMPORT_MAX_FILE_SIZE_BYTES: 26214400
       FINANCE_WORKER_POLL_INTERVAL_SECONDS: 1
+      FINANCE_FX_AUTO_SYNC_ENABLED: "${FINANCE_FX_AUTO_SYNC_ENABLED:-true}"
+      FINANCE_FX_AUTO_SYNC_INTERVAL_SECONDS: "${FINANCE_FX_AUTO_SYNC_INTERVAL_SECONDS:-3600}"
     volumes:
       - import-storage:/var/lib/finance-aggregator/imports
     depends_on:
       api:
         condition: service_healthy
+
+  frontend:
+    restart: unless-stopped
+    build:
+      context: ./frontend
+    environment:
+      FINANCE_FRONTEND_PROXY_TARGET: http://api:8000
+      HOST: 0.0.0.0
+      PORT: 5173
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5173').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   postgres-data:

@@ -11,8 +11,8 @@ from uuid import uuid4
 
 from shared.config import get_settings
 
-_STORAGE_KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{32}\.(csv|xlsx|pdf)$")
-_ALLOWED_SUFFIXES = frozenset({".csv", ".xlsx", ".pdf"})
+_STORAGE_KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{32}\.(csv|xlsx|xml|pdf)$")
+_ALLOWED_SUFFIXES = frozenset({".csv", ".xlsx", ".xml", ".pdf"})
 
 
 class StorageError(Exception):

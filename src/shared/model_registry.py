@@ -1,4 +1,8 @@
 from accounts.models import AccountModel as _AccountModel
+from allocation.models import AllocationCategoryModel as _AllocationCategoryModel
+from allocation.models import (
+    InstrumentCategoryOverrideModel as _InstrumentCategoryOverrideModel,
+)
 from calculation.models import CalculatedCashBalanceModel as _CalculatedCashBalanceModel
 from calculation.models import CalculatedCurrencyMetricsModel as _CalculatedCurrencyMetricsModel
 from calculation.models import CalculatedPositionModel as _CalculatedPositionModel
@@ -11,12 +15,16 @@ from instruments.models import InstrumentIdentifierModel as _InstrumentIdentifie
 from instruments.models import InstrumentModel as _InstrumentModel
 from operations.models import OperationModel as _OperationModel
 from portfolios.models import PortfolioModel as _PortfolioModel
+from pricing.models import ExchangeRateModel as _ExchangeRateModel
+from pricing.models import MarketMappingModel as _MarketMappingModel
 from pricing.models import MarketPriceModel as _MarketPriceModel
 from shared.database import Base
 
 DOMAIN_MODELS = (
     _PortfolioModel,
     _AccountModel,
+    _AllocationCategoryModel,
+    _InstrumentCategoryOverrideModel,
     _InstrumentModel,
     _InstrumentIdentifierModel,
     _OperationModel,
@@ -25,6 +33,8 @@ DOMAIN_MODELS = (
     _ImportResolutionModel,
     _ImportJobModel,
     _MarketPriceModel,
+    _MarketMappingModel,
+    _ExchangeRateModel,
     _CalculationSnapshotModel,
     _CalculatedPositionModel,
     _CalculatedCashBalanceModel,

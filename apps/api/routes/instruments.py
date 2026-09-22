@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Response, status
@@ -20,6 +20,8 @@ from instruments.service import (
     list_instruments,
     update_instrument,
 )
+from pricing.market_data import list_market_mappings, mapping_matches_instrument
+from pricing.schemas import MarketMappingListResponse, MarketMappingResponse
 from shared.database import get_db_session
 from shared.errors import ErrorResponse
 
@@ -111,6 +113,52 @@ async def list_instruments_route(
         items=[InstrumentResponse.model_validate(item) for item in instruments],
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/{instrument_id}/market-mappings",
+    response_model=MarketMappingListResponse,
+    responses=NOT_FOUND_RESPONSE,
+    summary="Inspect reviewed market-data mappings for an instrument",
+    description=(
+        "Shows why an asset is or is not eligible for automatic pricing. "
+        "An absent or ambiguous mapping never guesses a symbol."
+    ),
+)
+async def list_market_mappings_route(
+    instrument_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MarketMappingListResponse:
+    instrument = await get_instrument(session, instrument_id)
+    if instrument is None:
+        not_found("instrument")
+    mappings = await list_market_mappings(session, instrument_id)
+    items = [
+        MarketMappingResponse.model_validate(
+            {
+                **{
+                    field: getattr(mapping, field)
+                    for field in MarketMappingResponse.model_fields
+                    if field != "eligible"
+                },
+                "eligible": mapping.status == "verified"
+                and mapping_matches_instrument(mapping, instrument),
+            },
+        )
+        for mapping in mappings
+    ]
+    mapping_status: Literal["verified", "ambiguous", "unsupported", "unmapped"]
+    if any(item.eligible for item in items):
+        mapping_status = "verified"
+    elif any(item.status == "ambiguous" for item in items):
+        mapping_status = "ambiguous"
+    elif items:
+        mapping_status = "unsupported"
+    else:
+        mapping_status = "unmapped"
+    return MarketMappingListResponse(
+        instrument_id=instrument_id, status=mapping_status, items=items
     )
 
 

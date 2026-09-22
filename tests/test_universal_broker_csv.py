@@ -46,7 +46,7 @@ def test_universal_broker_csv_normalizes_supported_operations_and_exact_decimals
     validated = adapter.validate(parsed)
 
     assert detection.matched is True
-    assert detection.completeness is ImportCompleteness.COMPLETE
+    assert detection.completeness is ImportCompleteness.UNKNOWN
     assert len(validated.rows) == 10
     assert [row.normalized_candidate["operation_type"] for row in validated.rows] == [
         "trade",

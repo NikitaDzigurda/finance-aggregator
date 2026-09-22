@@ -22,6 +22,7 @@ from imports.models import (
     ImportRowStatus,
     ImportStatus,
 )
+from imports.reconciliation import ImportReconciliationError, reconcile_import_rows
 from imports.schemas import (
     AllowImportDuplicateRequest,
     ExcludeImportRowRequest,
@@ -33,13 +34,14 @@ from imports.schemas import (
 from instruments.models import InstrumentModel
 from operations.models import OperationModel, OperationSourceType
 from operations.schemas import OperationCreate
-from operations.service import payload_instrument_id
+from operations.service import payload_instrument_id, payload_secondary_instrument_id
 from shared.errors import ApiErrorException
 
 _OPERATION_ADAPTER: TypeAdapter[OperationCreate] = TypeAdapter(OperationCreate)
 _SOURCE_TYPES = {
     ImportFileFormat.CSV: OperationSourceType.CSV_IMPORT,
     ImportFileFormat.XLSX: OperationSourceType.XLSX_IMPORT,
+    ImportFileFormat.XML: OperationSourceType.XML_IMPORT,
     ImportFileFormat.PDF: OperationSourceType.PDF_IMPORT,
 }
 _INSTRUMENT_DIAGNOSTICS = {
@@ -144,6 +146,8 @@ async def confirm_import(
             "Import batch contains unresolved rows",
         )
 
+    _refresh_reconciliation(batch, rows)
+
     prepared: list[
         tuple[ImportRowModel, OperationCreate, str | None, str, str]
     ] = []
@@ -210,6 +214,7 @@ async def confirm_import(
             deduplication_key=deduplication_key,
             payload=payload.payload.model_dump(mode="json"),
             instrument_id=payload_instrument_id(payload),
+            secondary_instrument_id=payload_secondary_instrument_id(payload),
             note=payload.note,
         )
         session.add(ledger_operation)
@@ -328,28 +333,68 @@ async def _resolve_instrument(
         )
     candidate_copy = dict(candidate)
     payload = dict(cast(dict[str, object], candidate_copy["payload"]))
-    if "instrument_reference" not in payload:
+    reference_key = f"{request.target}_reference"
+    instrument_key = f"{request.target}_id"
+    if reference_key not in payload:
         _raise_conflict(
             "instrument_resolution_not_required",
             "Import row does not contain an unresolved instrument reference",
         )
-    payload.pop("instrument_reference")
-    payload["instrument_id"] = str(request.instrument_id)
+    payload.pop(reference_key)
+    payload[instrument_key] = str(request.instrument_id)
     candidate_copy["payload"] = payload
-    _validated_operation(batch, candidate_copy)
+    unresolved_targets = {
+        key.removesuffix("_reference")
+        for key in (
+            "instrument_reference",
+            "sold_instrument_reference",
+            "bought_instrument_reference",
+        )
+        if key in payload
+    }
+    if not unresolved_targets:
+        _validated_operation(batch, candidate_copy)
     row.normalized_candidate = candidate_copy
     row.warnings = [
-        item for item in row.warnings if item.get("code") not in _INSTRUMENT_DIAGNOSTICS
+        item
+        for item in row.warnings
+        if not (
+            item.get("code") in _INSTRUMENT_DIAGNOSTICS
+            and item.get("target", "instrument") == request.target
+        )
     ]
     row.errors = [
-        item for item in row.errors if item.get("code") not in _INSTRUMENT_DIAGNOSTICS
+        item
+        for item in row.errors
+        if not (
+            item.get("code") in _INSTRUMENT_DIAGNOSTICS
+            and item.get("target", "instrument") == request.target
+        )
     ]
+    existing_resolution = next(
+        (
+            item
+            for item in row.resolutions
+            if item.resolution_type is ImportResolutionType.INSTRUMENT_MATCH
+        ),
+        None,
+    )
+    existing_matches = (
+        existing_resolution.payload.get("matches")
+        if existing_resolution is not None
+        else None
+    )
+    resolved_targets = dict(existing_matches) if isinstance(existing_matches, dict) else {}
+    resolved_targets[request.target] = str(request.instrument_id)
     _upsert_resolution(
         row,
         ImportResolutionType.INSTRUMENT_MATCH,
-        payload={"instrument_id": str(request.instrument_id)},
+        payload={"matches": resolved_targets},
         note=request.note,
     )
+    if unresolved_targets:
+        row.status = _review_status(row)
+        return
     base_fingerprint = import_fingerprint(
         account_id=batch.account_id,
         source_provider=batch.source_provider,
@@ -511,6 +556,19 @@ async def _refresh_batch_review_state(
     batch.status = (
         ImportStatus.AWAITING_REVIEW if unresolved else ImportStatus.READY_TO_COMMIT
     )
+    _refresh_reconciliation(batch, rows)
+
+
+def _refresh_reconciliation(
+    batch: ImportBatchModel,
+    rows: list[ImportRowModel],
+) -> None:
+    try:
+        result = reconcile_import_rows(rows)
+    except ImportReconciliationError as exc:
+        _raise_conflict(exc.code, exc.message)
+    batch.reconciliation_status = result.status
+    batch.reconciliation_summary = result.summary
 
 
 def _upsert_resolution(

@@ -178,7 +178,10 @@ async def test_manual_ledger_operations_round_trip_and_filter() -> None:
 
             period_filter = await client.get(
                 "/api/v1/operations",
-                params={"occurred_from": "2026-08-03T10:31:00Z"},
+                params={
+                    "portfolio_id": portfolio_id,
+                    "occurred_from": "2026-08-03T10:31:00Z",
+                },
             )
             assert period_filter.status_code == 200
             assert period_filter.json()["items"] == []

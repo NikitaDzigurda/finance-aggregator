@@ -92,6 +92,22 @@ class TradePayload(PayloadBase):
     price_currency: CurrencyCode
 
 
+class CryptoTradePayload(PayloadBase):
+    sold_instrument_id: UUID
+    sold_quantity: PositiveQuantity
+    bought_instrument_id: UUID
+    bought_quantity: PositiveQuantity
+
+    @model_validator(mode="after")
+    def validate_instruments(self) -> Self:
+        if self.sold_instrument_id == self.bought_instrument_id:
+            raise PydanticCustomError(
+                "crypto_trade_same_instrument",
+                "Sold and bought instruments must differ",
+            )
+        return self
+
+
 class IncomePayload(PayloadBase):
     income_type: IncomeType
     amount: PositiveMoney
@@ -103,6 +119,11 @@ class FeePayload(PayloadBase):
     amount: PositiveMoney
     currency: CurrencyCode
     instrument_id: UUID | None = None
+
+
+class AssetFeePayload(PayloadBase):
+    instrument_id: UUID
+    quantity: PositiveQuantity
 
 
 class TaxPayload(PayloadBase):
@@ -184,8 +205,10 @@ class BalanceAdjustmentPayload(PayloadBase):
 
 type OperationPayload = (
     TradePayload
+    | CryptoTradePayload
     | IncomePayload
     | FeePayload
+    | AssetFeePayload
     | TaxPayload
     | CashMovementPayload
     | CurrencyExchangePayload
@@ -222,6 +245,11 @@ class TradeOperationCreate(OperationCreateBase):
     payload: TradePayload
 
 
+class CryptoTradeOperationCreate(OperationCreateBase):
+    operation_type: Literal[OperationType.CRYPTO_TRADE]
+    payload: CryptoTradePayload
+
+
 class IncomeOperationCreate(OperationCreateBase):
     operation_type: Literal[OperationType.INCOME]
     payload: IncomePayload
@@ -229,7 +257,7 @@ class IncomeOperationCreate(OperationCreateBase):
 
 class FeeOperationCreate(OperationCreateBase):
     operation_type: Literal[OperationType.FEE]
-    payload: FeePayload
+    payload: FeePayload | AssetFeePayload
 
 
 class TaxOperationCreate(OperationCreateBase):
@@ -269,6 +297,7 @@ class BalanceAdjustmentOperationCreate(OperationCreateBase):
 
 type OperationCreate = Annotated[
     TradeOperationCreate
+    | CryptoTradeOperationCreate
     | IncomeOperationCreate
     | FeeOperationCreate
     | TaxOperationCreate
@@ -311,6 +340,11 @@ class TradeOperationResponse(OperationResponseBase):
     payload: TradePayload
 
 
+class CryptoTradeOperationResponse(OperationResponseBase):
+    operation_type: Literal[OperationType.CRYPTO_TRADE]
+    payload: CryptoTradePayload
+
+
 class IncomeOperationResponse(OperationResponseBase):
     operation_type: Literal[OperationType.INCOME]
     payload: IncomePayload
@@ -318,7 +352,7 @@ class IncomeOperationResponse(OperationResponseBase):
 
 class FeeOperationResponse(OperationResponseBase):
     operation_type: Literal[OperationType.FEE]
-    payload: FeePayload
+    payload: FeePayload | AssetFeePayload
 
 
 class TaxOperationResponse(OperationResponseBase):
@@ -358,6 +392,7 @@ class BalanceAdjustmentOperationResponse(OperationResponseBase):
 
 type OperationResponse = Annotated[
     TradeOperationResponse
+    | CryptoTradeOperationResponse
     | IncomeOperationResponse
     | FeeOperationResponse
     | TaxOperationResponse
@@ -373,6 +408,7 @@ type OperationResponse = Annotated[
 
 _RESPONSE_MODELS: dict[OperationType, type[OperationResponseBase]] = {
     OperationType.TRADE: TradeOperationResponse,
+    OperationType.CRYPTO_TRADE: CryptoTradeOperationResponse,
     OperationType.INCOME: IncomeOperationResponse,
     OperationType.FEE: FeeOperationResponse,
     OperationType.TAX: TaxOperationResponse,

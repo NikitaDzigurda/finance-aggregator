@@ -6,7 +6,8 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID
 
-CALCULATION_CONTRACT_VERSION = 1
+CALCULATION_CONTRACT_VERSION = 2
+OPERATION_EFFECTS_CONTRACT_VERSION = 1
 
 
 class CostBasisMethod(StrEnum):
@@ -43,6 +44,14 @@ class TradeEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class CryptoTradeEvent:
+    sold_instrument_id: UUID
+    sold_quantity: Decimal
+    bought_instrument_id: UUID
+    bought_quantity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class IncomeEvent:
     amount: Decimal
     currency: str
@@ -52,6 +61,12 @@ class IncomeEvent:
 class FeeEvent:
     amount: Decimal
     currency: str
+
+
+@dataclass(frozen=True, slots=True)
+class AssetFeeEvent:
+    instrument_id: UUID
+    quantity: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,8 +126,10 @@ class CashAdjustmentEvent:
 
 type CalculationEvent = (
     TradeEvent
+    | CryptoTradeEvent
     | IncomeEvent
     | FeeEvent
+    | AssetFeeEvent
     | TaxEvent
     | CashMovementEvent
     | CurrencyExchangeEvent
@@ -130,6 +147,8 @@ class CalculationOperation:
     account_id: UUID
     occurred_at: datetime
     event: CalculationEvent
+    # A linked asset commission must follow its execution at an identical timestamp.
+    execution_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,4 +214,46 @@ class CalculationOutput:
     positions: tuple[CalculatedPosition, ...]
     cash_balances: tuple[CalculatedCashBalance, ...]
     currency_metrics: tuple[CalculatedCurrencyMetrics, ...]
+    diagnostics: tuple[CalculationDiagnostic, ...]
+
+
+class RealisedPnlEffectStatus(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class CalculationBasisEffect:
+    account_id: UUID
+    instrument_id: UUID
+    quantity_before: Decimal
+    quantity_after: Decimal
+    cost_currency_before: str | None
+    cost_currency_after: str | None
+    cost_basis_before: Decimal | None
+    cost_basis_after: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class CalculationRealisedPnlEffect:
+    account_id: UUID
+    currency: str
+    amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class CalculationOperationEffect:
+    operation_id: UUID
+    account_id: UUID
+    occurred_at: datetime
+    realised_pnl_status: RealisedPnlEffectStatus
+    realised_pnl: tuple[CalculationRealisedPnlEffect, ...]
+    basis_changes: tuple[CalculationBasisEffect, ...]
+    diagnostics: tuple[CalculationDiagnostic, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CalculationOperationEffectsOutput:
+    effects: tuple[CalculationOperationEffect, ...]
     diagnostics: tuple[CalculationDiagnostic, ...]

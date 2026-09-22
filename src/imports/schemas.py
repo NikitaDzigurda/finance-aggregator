@@ -11,6 +11,7 @@ from imports.models import (
     ImportFileFormat,
     ImportJobStatus,
     ImportJobType,
+    ImportReconciliationStatus,
     ImportResolutionSource,
     ImportResolutionType,
     ImportRowStatus,
@@ -56,17 +57,33 @@ class ImportRowResponse(BaseModel):
 
     id: UUID
     sequence_number: int
+    source_file_id: UUID | None
     source_page: int | None
     source_sheet: str | None
     source_row_number: int | None
     raw_data: dict[str, object]
     normalized_candidate: dict[str, object] | None
+    reconciliation_data: dict[str, object] | None
     status: ImportRowStatus
     warnings: list[dict[str, object]]
     errors: list[dict[str, object]]
     fingerprint: str | None
     matched_operation_id: UUID | None
     resolutions: list[ImportResolutionResponse]
+    created_at: AwareDateTime
+    updated_at: AwareDateTime
+
+
+class ImportBatchFileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    sequence_number: int
+    declared_format: ImportFileFormat
+    original_filename: str
+    file_size_bytes: int
+    sha256: str
+    detected_document_type: str | None
     created_at: AwareDateTime
     updated_at: AwareDateTime
 
@@ -84,6 +101,7 @@ class ImportBatchResponse(BaseModel):
     original_filename: str
     file_size_bytes: int
     sha256: str
+    files: list[ImportBatchFileResponse]
     reporting_period_start: date | None
     reporting_period_end: date | None
     completeness: ImportCompleteness
@@ -95,8 +113,16 @@ class ImportBatchResponse(BaseModel):
     duplicate_rows: int
     excluded_rows: int
     error_summary: dict[str, object] | None
+    reconciliation_status: ImportReconciliationStatus
+    reconciliation_summary: dict[str, object] | None
     created_at: AwareDateTime
     updated_at: AwareDateTime
+
+
+class ImportBatchListResponse(BaseModel):
+    items: list[ImportBatchResponse]
+    limit: int
+    offset: int
 
 
 class ImportJobResponse(BaseModel):
@@ -141,10 +167,19 @@ class ImportPreviewCurrencySummary(BaseModel):
 class ImportPreviewSummary(BaseModel):
     operation_counts: dict[str, int]
     currency_totals: dict[str, ImportPreviewCurrencySummary]
+    diagnostic_counts: dict[str, int]
 
 
 class ImportPreviewResponse(BaseModel):
     batch_id: UUID
+    source_provider: str
+    detected_format: str | None
+    detected_version: str | None
+    reporting_period_start: date | None
+    reporting_period_end: date | None
+    completeness: ImportCompleteness
+    reconciliation_status: ImportReconciliationStatus
+    reconciliation_summary: dict[str, object] | None
     status: ImportStatus
     total_rows: int
     ready_rows: int
@@ -179,6 +214,7 @@ class MatchImportInstrumentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["match_instrument"]
+    target: Literal["instrument", "sold_instrument", "bought_instrument"] = "instrument"
     instrument_id: UUID
     note: ResolutionNote | None = None
 
