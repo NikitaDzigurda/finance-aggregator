@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Финансовый агрегатор</title>
+  <circle cx="32" cy="32" r="24" fill="#eef6ff"/>
+  <path d="M32 8a24 24 0 0 1 24 24H32Z" fill="#67d7cf"/>
+  <path d="M32 32h24a24 24 0 0 1-24 24Z" fill="#258aa5"/>
+  <path d="M32 8v48M8 32h48" fill="none" stroke="#002653" stroke-width="2.5"/>
+</svg>

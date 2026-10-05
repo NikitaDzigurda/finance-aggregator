@@ -1,0 +1,7 @@
+node_modules
+dist
+test-results
+playwright-report
+.impeccable
+.DS_Store
+npm-debug.log*

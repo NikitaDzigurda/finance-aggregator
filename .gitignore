@@ -6,6 +6,16 @@ __pycache__/
 .ruff_cache/
 .venv/
 
+# Node.js dependencies and TypeScript cache
+node_modules/
+*.tsbuildinfo
+
+# Generated test reports
+test-results/
+playwright-report/
+coverage/
+htmlcov/
+
 # Build
 build/
 dist/
@@ -29,11 +39,22 @@ fixtures/private/
 *.broker-report.pdf
 *.bank-statement.pdf
 
-# Local project and AI-agent documentation
-# Keep these files on this computer; do not include them in a future repository.
-README.md
+# Local AI-agent instructions and documentation assets
+# Keep these paths local; other documentation may be included in the repository.
 AGENTS.md
-docs/
+/docs/assets/
+/docs/design-concepts/
+/docs/diagrams/
+/docs/fixtures/
+/docs/templates/
+
+# Local documents, report archives and tool settings
+/PRODUCT.md
+/.impeccable/settings.json
+/outputs/manual-qa-reports-v2.zip
+/outputs/synthetic-provider-reports-20260828.zip
+/docs/FINANCE_AGGREGATOR_TECHNICAL_OVERVIEW_RU.docx
+/docs/ПОЛНОЕ_ОПИСАНИЕ_ПРОЕКТА.docx
 
 # IDE / OS
 .DS_Store
